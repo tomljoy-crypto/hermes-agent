@@ -182,7 +182,16 @@ _KANBAN_MODULE_ROOTS = ("hermes_cli", "hermes_state", "hermes_constants")
 
 
 def _is_kanban_family(name: str) -> bool:
-    return name.split(".", 1)[0] in _KANBAN_MODULE_ROOTS
+    """Match the family the way the purging fixtures match it: by PREFIX.
+
+    ``test_kanban_per_profile_cap.py`` and ``test_kanban_cli_dispatch_passthrough.py``
+    drop ``mod.startswith(("hermes_cli", "hermes_state")) or mod == "hermes_constants"``
+    from ``sys.modules``. Selecting the snapshot by exact top-level name instead
+    left top-level ``hermes_state_wal`` purged and never restored, so the next
+    test's monkeypatch landed on a ghost module object that production's
+    function-local import no longer resolved.
+    """
+    return name.startswith(_KANBAN_MODULE_ROOTS)
 
 
 def _pin_parent_attribute(module_name: str, module) -> None:

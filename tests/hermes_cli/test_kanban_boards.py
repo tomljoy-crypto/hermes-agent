@@ -282,6 +282,11 @@ class TestWorkerSpawnEnv:
     """
 
     def test_default_spawn_sets_env_vars(self, fresh_home, monkeypatch):
+        # Topology, not payload: this test hand-builds a Task with no current run id and
+        # drives _default_spawn directly, so it must not inherit a systemd unit's
+        # INVOCATION_ID (a managed dispatcher deliberately fails that spawn closed — that
+        # contract lives in test_kanban_gateway_restart_handoff.py).
+        monkeypatch.delenv("INVOCATION_ID", raising=False)
         captured = {}
 
         class FakeProc:

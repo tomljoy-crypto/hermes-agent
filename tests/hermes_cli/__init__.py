@@ -32,10 +32,17 @@ What to do when a failure appears only in a package run:
 
 Known stale tests (not product bugs), all building a claimed card with
 ``current_run_id=None`` and driving ``_default_spawn`` directly — a state dispatch
-cannot produce, because claiming always sets a run id:
+cannot produce, because claiming always sets a run id. They are pinned to the
+unmanaged topology and therefore pass in both environments:
 ``test_kanban_db.py::TestSharedBoardPaths::test_dispatcher_spawn_injects_kanban_paths_without_stale_session``,
 ``test_kanban_db.py::test_default_spawn_pins_repo_root_on_module_worker_pythonpath``,
 ``test_kanban_boards.py::TestWorkerSpawnEnv::test_default_spawn_sets_env_vars``,
 and the equivalent cases in ``test_kanban_worker_terminal_scope.py``,
 ``test_kanban_worker_session_source.py`` and ``test_kanban_core_functionality.py``.
+
+Measured after those fixes (base ``62adc7bfc2``): ``pytest tests/hermes_cli -k
+kanban`` reports **671 passed, 6 skipped, 0 failed** both with ``INVOCATION_ID``
+inherited from the gateway's systemd unit and with it unset — the package no
+longer needs a different answer depending on how it is started, and no test in
+this package requires running alone.
 """

@@ -22,6 +22,8 @@ def db(tmp_path, monkeypatch):
 
 def test_worker_spawn_tags_session_source_kanban(monkeypatch, tmp_path):
     """The dispatcher tags the worker's env so its session is a `kanban` row."""
+    # Topology, not payload: see test_kanban_boards.py::test_default_spawn_sets_env_vars.
+    monkeypatch.delenv("INVOCATION_ID", raising=False)
     from hermes_cli import kanban_db as kb
     from hermes_cli import kanban_db_dispatch as kbd
 

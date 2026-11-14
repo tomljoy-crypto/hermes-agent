@@ -16,6 +16,18 @@ from hermes_cli import kanban_db_dispatch
 from tools.terminal_scope import get_terminal_scope
 
 
+@pytest.fixture(autouse=True)
+def _pin_unmanaged_topology(monkeypatch):
+    """These tests hand-build a Task with no current run id and drive _default_spawn.
+
+    A dispatcher running under a systemd unit (INVOCATION_ID present) deliberately
+    fails that spawn closed with 'cannot create restart-safe systemd scope', so the
+    suite's verdict must not depend on whether pytest inherited the unit's env.
+    The managed-refusal contract is covered by test_kanban_gateway_restart_handoff.py.
+    """
+    monkeypatch.delenv("INVOCATION_ID", raising=False)
+
+
 class _StopSpawn(Exception):
     """Abort ``_default_spawn`` after the env is built so no worker process is created."""
 
