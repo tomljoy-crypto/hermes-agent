@@ -250,3 +250,58 @@ def test_decompose_returns_false_when_task_not_triage(kanban_home):
     assert outcome.ok is False
 
 
+# --- duplicate sibling collapse (_clean_children) -------------------------
+
+
+def _routing() -> decomp._Routing:
+    return decomp._Routing(
+        orchestrator="orchestrator",
+        default_assignee="default",
+        auto_promote=True,
+        roster=[],
+        valid_names={"orchestrator", "default", "peer"},
+    )
+
+
+def test_clean_children_collapses_duplicate_titles():
+    """One fix must not fan out as twin cards (case/space/punctuation variants)."""
+    raw = [
+        {"title": "Fix the auth redirect"},
+        {"title": "fix the   auth redirect."},
+        {"title": "FIX THE AUTH REDIRECT!"},
+    ]
+    children, reason = decomp._clean_children("t1", raw, _routing())
+    assert reason == ""
+    assert [c["title"] for c in children] == ["Fix the auth redirect"]
+
+
+def test_clean_children_keeps_distinct_titles():
+    raw = [{"title": "Fix the auth redirect"}, {"title": "Rotate the signing key"}]
+    children, reason = decomp._clean_children("t1", raw, _routing())
+    assert reason == ""
+    assert [c["title"] for c in children] == ["Fix the auth redirect", "Rotate the signing key"]
+
+
+def test_clean_children_remaps_parents_across_a_dropped_twin():
+    """A child whose parent was dropped must point at the surviving keeper."""
+    raw = [
+        {"title": "Investigate"},
+        {"title": "Investigate"},           # twin of 0 -> dropped
+        {"title": "Patch", "parents": [1]},  # must remap onto 0
+        {"title": "Verify", "parents": [0, 2]},
+    ]
+    children, reason = decomp._clean_children("t1", raw, _routing())
+    assert reason == ""
+    assert [(c["title"], c["parents"]) for c in children] == [
+        ("Investigate", []),
+        ("Patch", [0]),
+        ("Verify", [0, 1]),
+    ]
+
+
+def test_clean_children_still_rejects_empty_title():
+    raw = [{"title": "ok"}, {"title": "   "}]
+    children, reason = decomp._clean_children("t1", raw, _routing())
+    assert children == [] and "tasks[1].title" in reason
+
+
