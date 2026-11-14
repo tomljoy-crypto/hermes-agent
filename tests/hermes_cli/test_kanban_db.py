@@ -1120,6 +1120,11 @@ class TestSharedBoardPaths:
         default_home = tmp_path / ".hermes"
         default_home.mkdir()
         self._set_home(monkeypatch, tmp_path, default_home)
+        # Topology, not payload: this test asserts the env the dispatcher builds, so it
+        # must not inherit a systemd unit's INVOCATION_ID from whatever host runs pytest
+        # (a managed dispatcher deliberately fails the spawn closed instead — that
+        # contract lives in test_kanban_gateway_restart_handoff.py).
+        monkeypatch.delenv("INVOCATION_ID", raising=False)
 
         from gateway import session_context as sc
 
@@ -1644,6 +1649,10 @@ def test_default_spawn_pins_repo_root_on_module_worker_pythonpath(tmp_path, monk
     monkeypatch.delenv("HERMES_KANBAN_HOME", raising=False)
     monkeypatch.delenv("PYTHONPATH", raising=False)
     monkeypatch.delenv("HERMES_BIN", raising=False)
+    # Topology, not payload: the argv/env shape under test does not depend on whether
+    # pytest itself runs under a systemd unit. INVOCATION_ID selects the fail-closed
+    # managed-dispatcher path (covered by test_kanban_gateway_restart_handoff.py).
+    monkeypatch.delenv("INVOCATION_ID", raising=False)
 
     captured = {}
 
