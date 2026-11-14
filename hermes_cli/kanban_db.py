@@ -1249,6 +1249,31 @@ def create_task(
             # allow_nested: graph builders compose create_task under one outer
             # commit so the dispatcher never sees a half-built graph.
             with write_txn(conn, allow_nested=True):
+                # Dedup gate (failure mode B, Kanban-Task-Dispatch-SOP): one
+                # fix must not spawn sibling cards. A title that normalises
+                # (case-insensitive, whitespace-collapsed, trailing punctuation
+                # stripped) to an existing non-archived card created in the
+                # last 24h returns that card's id instead of creating a twin.
+                dupe = next(
+                    (
+                        r["id"]
+                        for r in conn.execute(
+                            "SELECT id FROM tasks "
+                            "WHERE id != ? AND status != 'archived' AND created_at >= ? "
+                            "AND lower(replace(replace(title, char(9), ' '), char(10), ' ')) = ? "
+                            "ORDER BY created_at DESC LIMIT 1",
+                            (
+                                task_id,
+                                now - 24 * 3600,
+                                re.sub(r"\s+", " ", title.strip().lower()).rstrip(" .!?:;-"),
+                            ),
+                        )
+                    ),
+                    None,
+                )
+                if dupe is not None:
+                    # Refuse the sibling: hand back the card that already tracks this fix.
+                    return dupe
                 task_status, tenant = initial_task_state(conn, parents, initial_status, triage, tenant)
                 # Project worktree: fresh dir under the repo + deterministic
                 # branch, instead of the random ``wt/<id>`` worker fallback.
