@@ -237,16 +237,50 @@ def _apply_single(task: kb.Task, parsed: dict, routing: _Routing, author: str) -
     return DecomposeOutcome(task.id, True, "single task (no fanout)", fanout=False, new_title=title_val)
 
 
+def _title_key(title: str) -> str:
+    """Discriminator for duplicate siblings: case-, space- and trailing-punctuation-insensitive."""
+    return re.sub(r"\s+", " ", title.strip().lower())[:200].rstrip(" .!?:;-")
+
+
 def _clean_children(task_id: str, raw_tasks: list, routing: _Routing) -> tuple[list[dict], str]:
     """Validate/normalise the LLM's ``tasks`` list; ``(children, "")`` or ``([], reason)``.
-    Unknown assignees route to the default; never assignee=None."""
-    children: list[dict] = []
+    Unknown assignees route to the default; never assignee=None.
+
+    Duplicate siblings collapse onto their first occurrence: one fix must not
+    fan out as twin cards. Within a fanout the tenant is uniform (children
+    inherit it from the triage task), so the normalised title is the whole key.
+    Parent indices are remapped to the surviving positions, so dropping an entry
+    never re-points a live child at the wrong card.
+    """
     for idx, entry in enumerate(raw_tasks):
         if not isinstance(entry, dict):
             return [], f"tasks[{idx}] is not an object"
         title = entry.get("title")
         if not isinstance(title, str) or not title.strip():
             return [], f"tasks[{idx}].title is missing or empty"
+
+    # raw index -> raw index of its first twin (itself when unique)
+    canonical: dict[int, int] = {}
+    seen: dict[str, int] = {}
+    for idx, entry in enumerate(raw_tasks):
+        key = _title_key(entry["title"])
+        if key in seen:
+            canonical[idx] = seen[key]
+            logger.info(
+                "decompose: task %s child %d %r duplicates child %d — dropping the twin",
+                task_id, idx, entry["title"].strip()[:200], seen[key],
+            )
+        else:
+            seen[key] = idx
+            canonical[idx] = idx
+
+    kept = [idx for idx in range(len(raw_tasks)) if canonical[idx] == idx]
+    position = {raw: pos for pos, raw in enumerate(kept)}
+
+    children: list[dict] = []
+    for pos, idx in enumerate(kept):
+        entry = raw_tasks[idx]
+        title = entry["title"]
         body = entry.get("body")
         assignee = entry.get("assignee")
         chosen = _normalize_assignee_choice(
@@ -261,12 +295,21 @@ def _clean_children(task_id: str, raw_tasks: list, routing: _Routing) -> tuple[l
         parents = entry.get("parents") or []
         if not isinstance(parents, list):
             parents = []
+        remapped: list[int] = []
+        for raw_parent in parents:
+            # Drop non-int and out-of-range indices, then re-point onto the
+            # surviving position (a twin's index resolves to the twin's keeper).
+            if not isinstance(raw_parent, int) or not 0 <= raw_parent < len(raw_tasks):
+                continue
+            target = position[canonical[raw_parent]]
+            if target == pos or target in remapped:
+                continue
+            remapped.append(target)
         children.append({
             "title": title.strip()[:200],
             "body": body.strip() if isinstance(body, str) else "",
             "assignee": chosen,
-            # Drop non-int, out-of-range and self parent indices.
-            "parents": [p for p in parents if isinstance(p, int) and 0 <= p < len(raw_tasks) and p != idx],
+            "parents": remapped,
         })
     return children, ""
 
