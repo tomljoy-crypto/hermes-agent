@@ -99,6 +99,29 @@ class _GateInfraError(RuntimeError):
     """The gh CLI itself is missing or unusable on this host — actionable as infra."""
 
 
+def _secret_source_bootstrap_env() -> frozenset[str]:
+    """Env names the secret sources authenticate with, so a child ``gh`` never carries a vault token.
+
+    PR #155697 scrubs the same set via ``tools.environments.local_env_policy.
+    _secret_source_bootstrap_env``, a helper that does not exist on this deploy line
+    (importing it raises ImportError), so the set is derived here from the secret-source
+    registry: every source declares the config key and default env name it reads. Falls
+    back to the two bundled names when the registry cannot load — popping a name nobody
+    set costs nothing, leaking one costs a credential.
+    """
+    bundled = {"BWS_ACCESS_TOKEN", "OP_SERVICE_ACCOUNT_TOKEN"}
+    try:
+        from agent.secret_sources.registry import list_sources
+        declared = {
+            str(getattr(source, "default_token_env", "") or "")
+            for source in list_sources()
+            if getattr(source, "token_env_key", None)
+        }
+    except Exception:  # never let the scrub decide whether the acceptance read happens
+        return frozenset(bundled)
+    return frozenset(declared | bundled)
+
+
 def _gh_env(profile_home: str | None) -> dict[str, str] | None:
     """Child env for ``gh``: the card's profile identity when one is resolvable.
 
@@ -120,6 +143,9 @@ def _gh_env(profile_home: str | None) -> dict[str, str] | None:
         # credential, so no scrub list sees it; the target's own value is overlaid from its .env.
         base.pop("GH_CONFIG_DIR", None)
     env = served_profile_child_env(base=base, target_home=profile_home, inherit_credentials=True)
+    # The profile overlay re-adds a vault bootstrap token from the target's .env; gh never uses it.
+    for name in _secret_source_bootstrap_env():
+        env.pop(name, None)
     if routed and not (env.keys() & {"GH_TOKEN", "GITHUB_TOKEN", "GH_CONFIG_DIR"}):
         # HOME/XDG_CONFIG_HOME are still the launch process's: without a login of its own the
         # child would fall through to ~/.config/gh/hosts.yml — the ambient login. Pin gh's config
