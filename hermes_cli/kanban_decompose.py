@@ -24,7 +24,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from hermes_cli import kanban_db as kb
-from hermes_cli.kanban_db_graph import decompose_triage_task
+from hermes_cli.kanban_db_graph import decompose_triage_task, close_duplicate_triage_root
 from hermes_cli import kanban_db_connect as kbc
 from hermes_cli import profiles as profiles_mod
 from hermes_cli.kanban_specify import (
@@ -390,6 +390,24 @@ def _apply_fanout(task_id: str, parsed: dict, routing: _Routing, author: str) ->
         )
         if reason:
             return DecomposeOutcome(task_id, False, reason)
+        if not children:
+            # Every child was refused as a duplicate of an existing card. Creating
+            # nothing and leaving the root in triage would re-run this same
+            # decomposition on every dispatch tick — the loop that made one fix
+            # into ten cards. Converge the root on the cards that already exist.
+            closed = close_duplicate_triage_root(
+                conn, task_id, dedup_hits, author=author,
+            )
+            if not closed:
+                return DecomposeOutcome(
+                    task_id, False, "task already decomposed or moved out of triage",
+                )
+            return DecomposeOutcome(
+                task_id, True,
+                f"all {len(dedup_hits)} children already exist — root closed as duplicate of "
+                + ", ".join(sorted(set(dedup_hits.values()))),
+                fanout=True, child_ids=[], dedup_hits=dedup_hits,
+            )
         try:
             child_ids = decompose_triage_task(
                 conn,

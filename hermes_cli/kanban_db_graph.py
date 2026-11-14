@@ -166,6 +166,60 @@ def decompose_triage_task(
     return child_ids
 
 
+def close_duplicate_triage_root(
+    conn: sqlite3.Connection, task_id: str, existing_ids: dict[str, str],
+    *, author: Optional[str] = None,
+) -> bool:
+    """``triage -> done`` for a root whose every child was refused as a duplicate.
+
+    Without this the fan-out has nothing to create, ``decompose_triage_task``
+    returns ``None``, and the root stays in ``triage`` — so the dispatcher
+    re-runs the same decomposition on every tick, which is exactly how one fix
+    became ten cards. The root converges on the cards that already exist:
+    comment + ``completed`` event name them, so the operator sees the pointer
+    instead of a silent drop. No children are created. Returns False when the
+    root is not in triage (already handled elsewhere).
+    """
+    from hermes_cli.kanban_db import (
+        _append_event, _insert_comment, write_txn, recompute_ready,
+    )
+
+    ids = sorted({v for v in existing_ids.values() if v})
+    if not ids:
+        return False
+    now = int(time.time())
+    summary = (
+        "Duplicate of existing card(s) " + ", ".join(ids)
+        + " — decomposition refused to create a sibling. "
+        "Track the work on the existing card(s)."
+    )
+    with write_txn(conn):
+        row = conn.execute(
+            "SELECT status FROM tasks WHERE id = ?", (task_id,),
+        ).fetchone()
+        if row is None or row["status"] != "triage":
+            return False
+        conn.execute(
+            "UPDATE tasks SET status = 'done', completed_at = ? WHERE id = ?",
+            (now, task_id),
+        )
+        _insert_comment(
+            conn, task_id, (author or "decomposer"),
+            summary + " Refused: " + ", ".join(
+                f"{title} -> {cid}" for title, cid in sorted(existing_ids.items())
+            ),
+            now,
+        )
+        _append_event(conn, task_id, "dedup_refused", {
+            "existing_ids": ids, "refused_titles": sorted(existing_ids),
+        })
+        _append_event(conn, task_id, "completed", {
+            "by": author or "decomposer", "dedup_pointer": ids,
+        })
+    recompute_ready(conn)
+    return True
+
+
 def _insert_decomposed_child(
     conn: sqlite3.Connection, root_id: str, root_row: sqlite3.Row, child: dict,
     author: Optional[str], now: int,
