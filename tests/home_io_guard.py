@@ -64,6 +64,29 @@ def _contains(path: str, prefix: str) -> bool:
     return prefix.startswith(path) if path == os.sep else prefix.startswith(path + os.sep)
 
 
+def _disposable_workspace(path: str, root: str, *, destructive: bool) -> bool:
+    """True when *path* is inside a Kanban worker's own workspace under *root*.
+
+    ``<root>/kanban/workspaces/<id>`` is created for a single card and deleted with it (a
+    scratch dir or a git worktree), so it is disposable working space, not Hermes state: a
+    card running inside it must be able to probe and write its own tree. The reported case was
+    pm's environment probe of ``<workspace>/manifest.json`` aborting six kanban handoff tests
+    from inside a card worktree.
+
+    The chain is matched on path components, never a substring, so ``<root>/kanban.db``,
+    ``<root>/manifest.json``, ``<root>/profiles/``, the workspaces root itself and lookalikes
+    such as ``<root>/profiles/kanban/workspaces/<id>/`` stay refused. The workspace directory
+    itself may be read or created but not removed or renamed (``destructive``): that would
+    destroy a live card's work.
+    """
+    if not _within(path, root):
+        return False
+    parts = [part for part in path[len(root):].split(os.sep) if part]
+    if len(parts) < 3 or parts[0] != "kanban" or parts[1] != "workspaces" or not parts[2]:
+        return False
+    return len(parts) > 3 or not destructive
+
+
 class HomeIOGuard:
     def __init__(self, roots, installed_apps=lambda: ()):
         self.roots = roots
@@ -123,7 +146,7 @@ class HomeIOGuard:
             # Check the lexical path first: resolving must not probe a protected
             # tree merely to decide that the original path was forbidden.
             for root in roots:
-                if _within(absolute, root):
+                if _within(absolute, root) and not _disposable_workspace(absolute, root, destructive=destructive):
                     self.refuse(value)
             if resolved is None:
                 resolved = _normcase(os.path.realpath(absolute))
@@ -134,7 +157,7 @@ class HomeIOGuard:
                 if _within(resolved, prefix):
                     return
             for root in roots:
-                if _within(resolved, root):
+                if _within(resolved, root) and not _disposable_workspace(resolved, root, destructive=destructive):
                     self.refuse(value)
         finally:
             self.checking.active = False
