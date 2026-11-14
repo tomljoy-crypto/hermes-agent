@@ -19,7 +19,8 @@ from __future__ import annotations
 
 import logging
 import re
-from dataclasses import dataclass
+import time
+from dataclasses import dataclass, field
 from typing import Optional
 
 from hermes_cli import kanban_db as kb
@@ -119,6 +120,7 @@ class DecomposeOutcome:
     fanout: bool = False
     child_ids: list[str] | None = None
     new_title: Optional[str] = None
+    dedup_hits: dict[str, str] = field(default_factory=dict)  # child title -> existing card id
 
 
 def _profile_author() -> str:
@@ -237,16 +239,111 @@ def _apply_single(task: kb.Task, parsed: dict, routing: _Routing, author: str) -
     return DecomposeOutcome(task.id, True, "single task (no fanout)", fanout=False, new_title=title_val)
 
 
-def _clean_children(task_id: str, raw_tasks: list, routing: _Routing) -> tuple[list[dict], str]:
-    """Validate/normalise the LLM's ``tasks`` list; ``(children, "")`` or ``([], reason)``.
-    Unknown assignees route to the default; never assignee=None."""
-    children: list[dict] = []
+def _title_key(title: str) -> str:
+    """Discriminator for duplicate siblings: case-, space- and trailing-punctuation-insensitive."""
+    return re.sub(r"\s+", " ", title.strip().lower())[:200].rstrip(" .!?:;-")
+
+
+# Window for the board-wide dedup gate: a card created (or last completed)
+# within this many seconds blocks a would-be duplicate child.
+_DEDUP_WINDOW_SECONDS = 24 * 3600
+
+
+def _existing_card_for_title(
+    conn, title: str, *, tenant: Optional[str], exclude_id: str,
+    window_seconds: int = _DEDUP_WINDOW_SECONDS,
+) -> Optional[str]:
+    """Return the id of an open/done card whose normalised title matches
+    ``title`` and was created within ``window_seconds`` — the dedup gate
+    that stops a fix re-fanning out as twin cards across dispatches.
+
+    Scope is the same tenant (children inherit the triage task's tenant, so
+    one dispatch never dedupes across tenants) and excludes the triage root
+    itself. ``created_at`` is an INTEGER epoch-seconds column; completed
+    cards count too, so a finished fix is not re-opened within 24h.
+    """
+    cutoff = int(time.time()) - window_seconds
+    rows = conn.execute(
+        """SELECT id, title FROM tasks
+           WHERE id != ?
+             AND (tenant IS ? OR tenant = ?)
+             AND created_at >= ?
+             AND status IN ('todo', 'ready', 'running', 'review', 'blocked', 'done', 'failed')
+           ORDER BY created_at ASC""",
+        (exclude_id, tenant, tenant or "", cutoff),
+    ).fetchall()
+    target_key = _title_key(title)
+    for row_id, row_title in rows:
+        if _title_key(row_title) == target_key:
+            return row_id
+    return None
+
+
+def _clean_children(
+    task_id: str, raw_tasks: list, routing: _Routing, *, conn,
+    tenant: Optional[str],
+) -> tuple[list[dict], str, dict[str, str]]:
+    """Validate/normalise the LLM's ``tasks`` list; ``(children, "", {})`` or
+    ``([], reason, {})``.
+    Unknown assignees route to the default; never assignee=None.
+
+    Two dedup layers:
+      1. Duplicate siblings within the reply collapse onto their first
+         occurrence (one fix must not fan out as twin cards).
+      2. A child whose normalised title matches an existing open/done card
+         created in the last 24h on the same tenant is refused — the
+         existing card's id is returned instead of a sibling, so repeated
+         dispatches of the same fix converge on one tracker.
+    Parent indices are remapped to the surviving positions, so dropping an
+    entry never re-points a live child at the wrong card.
+    """
     for idx, entry in enumerate(raw_tasks):
         if not isinstance(entry, dict):
-            return [], f"tasks[{idx}] is not an object"
+            return [], f"tasks[{idx}] is not an object", {}
         title = entry.get("title")
         if not isinstance(title, str) or not title.strip():
-            return [], f"tasks[{idx}].title is missing or empty"
+            return [], f"tasks[{idx}].title is missing or empty", {}
+
+    # Pass 1: collapse duplicate siblings within the reply.
+    canonical: dict[int, int] = {}
+    seen: dict[str, int] = {}
+    for idx, entry in enumerate(raw_tasks):
+        key = _title_key(entry["title"])
+        if key in seen:
+            canonical[idx] = seen[key]
+            logger.info(
+                "decompose: task %s child %d %r duplicates child %d — dropping the twin",
+                task_id, idx, entry["title"].strip()[:200], seen[key],
+            )
+        else:
+            seen[key] = idx
+            canonical[idx] = idx
+
+    kept = [idx for idx in range(len(raw_tasks)) if canonical[idx] == idx]
+
+    # Pass 2: refuse children that duplicate an existing board card <24h old.
+    dedup_hits: dict[str, str] = {}
+    survivors: list[int] = []
+    for idx in kept:
+        entry = raw_tasks[idx]
+        existing = _existing_card_for_title(
+            conn, entry["title"], tenant=tenant, exclude_id=task_id,
+        )
+        if existing:
+            dedup_hits[entry["title"].strip()[:200]] = existing
+            logger.info(
+                "decompose: task %s child %d %r duplicates existing card %s — refusing the duplicate",
+                task_id, idx, entry["title"].strip()[:200], existing,
+            )
+            continue
+        survivors.append(idx)
+    kept = survivors
+    position = {raw: pos for pos, raw in enumerate(kept)}
+
+    children: list[dict] = []
+    for pos, idx in enumerate(kept):
+        entry = raw_tasks[idx]
+        title = entry["title"]
         body = entry.get("body")
         assignee = entry.get("assignee")
         chosen = _normalize_assignee_choice(
@@ -261,25 +358,39 @@ def _clean_children(task_id: str, raw_tasks: list, routing: _Routing) -> tuple[l
         parents = entry.get("parents") or []
         if not isinstance(parents, list):
             parents = []
+        remapped: list[int] = []
+        for raw_parent in parents:
+            # Drop non-int and out-of-range indices, then re-point onto the
+            # surviving position (a twin's index resolves to the twin's keeper).
+            if not isinstance(raw_parent, int) or not 0 <= raw_parent < len(raw_tasks):
+                continue
+            target = position[canonical[raw_parent]]
+            if target == pos or target in remapped:
+                continue
+            remapped.append(target)
         children.append({
             "title": title.strip()[:200],
             "body": body.strip() if isinstance(body, str) else "",
             "assignee": chosen,
-            # Drop non-int, out-of-range and self parent indices.
-            "parents": [p for p in parents if isinstance(p, int) and 0 <= p < len(raw_tasks) and p != idx],
+            "parents": remapped,
         })
-    return children, ""
+    return children, "", dedup_hits
 
 
 def _apply_fanout(task_id: str, parsed: dict, routing: _Routing, author: str) -> DecomposeOutcome:
     raw_tasks = parsed.get("tasks") or []
     if not isinstance(raw_tasks, list) or not raw_tasks:
         return DecomposeOutcome(task_id, False, "decomposer returned fanout=true with empty tasks list")
-    children, reason = _clean_children(task_id, raw_tasks, routing)
-    if reason:
-        return DecomposeOutcome(task_id, False, reason)
-    try:
-        with kbc.connect_closing() as conn:
+    with kbc.connect_closing() as conn:
+        root = kb.get_task(conn, task_id)
+        if root is None:
+            return DecomposeOutcome(task_id, False, "task vanished before fanout")
+        children, reason, dedup_hits = _clean_children(
+            task_id, raw_tasks, routing, conn=conn, tenant=root.tenant,
+        )
+        if reason:
+            return DecomposeOutcome(task_id, False, reason)
+        try:
             child_ids = decompose_triage_task(
                 conn,
                 task_id,
@@ -288,16 +399,19 @@ def _apply_fanout(task_id: str, parsed: dict, routing: _Routing, author: str) ->
                 author=author,
                 auto_promote=routing.auto_promote,
             )
-    except ValueError as exc:
-        return DecomposeOutcome(task_id, False, f"DB rejected graph: {exc}")
-    except Exception as exc:
-        logger.exception("decompose: DB error on task %s", task_id)
-        return DecomposeOutcome(task_id, False, f"DB error: {type(exc).__name__}")
-    if child_ids is None:
-        return DecomposeOutcome(task_id, False, "task already decomposed or moved out of triage")
-    return DecomposeOutcome(
-        task_id, True, f"decomposed into {len(child_ids)} children", fanout=True, child_ids=child_ids,
-    )
+        except ValueError as exc:
+            return DecomposeOutcome(task_id, False, f"DB rejected graph: {exc}")
+        except Exception as exc:
+            logger.exception("decompose: DB error on task %s", task_id)
+            return DecomposeOutcome(task_id, False, f"DB error: {type(exc).__name__}")
+        if child_ids is None:
+            return DecomposeOutcome(task_id, False, "task already decomposed or moved out of triage")
+        return DecomposeOutcome(
+            task_id, True,
+            f"decomposed into {len(child_ids)} children"
+            + (f"; {len(dedup_hits)} duplicates refused" if dedup_hits else ""),
+            fanout=True, child_ids=child_ids, dedup_hits=dedup_hits,
+        )
 
 
 def decompose_task(

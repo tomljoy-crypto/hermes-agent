@@ -250,3 +250,112 @@ def test_decompose_returns_false_when_task_not_triage(kanban_home):
     assert outcome.ok is False
 
 
+# --- duplicate sibling collapse (_clean_children) -------------------------
+
+
+def _routing() -> decomp._Routing:
+    return decomp._Routing(
+        orchestrator="orchestrator",
+        default_assignee="default",
+        auto_promote=True,
+        roster=[],
+        valid_names={"orchestrator", "default", "peer"},
+    )
+
+
+def _clean(raw, *, tenant=None):
+    """Call _clean_children against a fresh in-memory board."""
+    with kbc.connect() as conn:
+        return decomp._clean_children("t1", raw, _routing(), conn=conn, tenant=tenant)
+
+
+def test_clean_children_collapses_duplicate_titles():
+    """One fix must not fan out as twin cards (case/space/punctuation variants)."""
+    raw = [
+        {"title": "Fix the auth redirect"},
+        {"title": "fix the   auth redirect."},
+        {"title": "FIX THE AUTH REDIRECT!"},
+    ]
+    children, reason, _ = _clean(raw)
+    assert reason == ""
+    assert [c["title"] for c in children] == ["Fix the auth redirect"]
+
+
+def test_clean_children_keeps_distinct_titles():
+    raw = [{"title": "Fix the auth redirect"}, {"title": "Rotate the signing key"}]
+    children, reason, _ = _clean(raw)
+    assert reason == ""
+    assert [c["title"] for c in children] == ["Fix the auth redirect", "Rotate the signing key"]
+
+
+def test_clean_children_remaps_parents_across_a_dropped_twin():
+    """A child whose parent was dropped must point at the surviving keeper."""
+    raw = [
+        {"title": "Investigate"},
+        {"title": "Investigate"},           # twin of 0 -> dropped
+        {"title": "Patch", "parents": [1]},  # must remap onto 0
+        {"title": "Verify", "parents": [0, 2]},
+    ]
+    children, reason, _ = _clean(raw)
+    assert reason == ""
+    assert [(c["title"], c["parents"]) for c in children] == [
+        ("Investigate", []),
+        ("Patch", [0]),
+        ("Verify", [0, 1]),
+    ]
+
+
+def test_clean_children_still_rejects_empty_title():
+    raw = [{"title": "ok"}, {"title": "   "}]
+    children, reason, _ = _clean(raw)
+    assert children == [] and "tasks[1].title" in reason
+
+
+def test_clean_children_refuses_a_recent_existing_card(kanban_home):
+    """A card created <24h ago with the same normalised title must be
+    returned instead of a new sibling, with the dedup hit recorded."""
+    with kbc.connect() as conn:
+        existing = kb.create_task(conn, title="Rotate the signing key", assignee="kitt")
+    raw = [{"title": "rotate THE signing key!!", "assignee": "kitt"}]
+    children, reason, hits = _clean(raw)
+    assert reason == ""
+    assert children == []  # nothing new to create
+    assert hits == {"rotate THE signing key!!": existing}
+
+
+def test_clean_children_allows_near_miss_different_title(kanban_home):
+    """(b) Near-miss (different subject) with an active card on the board creates a new card."""
+    with kbc.connect() as conn:
+        kb.create_task(conn, title="Rotate the signing key v1", assignee="kitt")
+    raw = [{"title": "Rotate the signing key v2", "assignee": "kitt"}]
+    children, reason, hits = _clean(raw)
+    assert reason == ""
+    assert [c["title"] for c in children] == ["Rotate the signing key v2"]
+    assert hits == {}
+
+
+def test_clean_children_allows_archived_card(kanban_home):
+    """(c) An archived match is not a dedup hit — created_at < 24h ago but status = 'archived'."""
+    with kbc.connect() as conn:
+        existing = kb.create_task(conn, title="Archived fix", assignee="kitt")
+        kb.archive_task(conn, existing)
+    raw = [{"title": "Archived fix", "assignee": "kitt"}]
+    children, reason, hits = _clean(raw)
+    assert reason == ""
+    assert [c["title"] for c in children] == ["Archived fix"]
+    assert hits == {}
+
+
+def test_clean_children_allows_25h_old_card(kanban_home):
+    """(d) A 25h-old match is outside the 24h window and is allowed to create a new card."""
+    with kbc.connect() as conn:
+        existing = kb.create_task(conn, title="25h old fix", assignee="kitt")
+        conn.execute("UPDATE tasks SET created_at = created_at - 25 * 3600 WHERE id = ?", (existing,))
+    raw = [{"title": "25h old fix", "assignee": "kitt"}]
+    children, reason, hits = _clean(raw)
+    assert reason == ""
+    assert [c["title"] for c in children] == ["25h old fix"]
+    assert hits == {}
+
+
+
