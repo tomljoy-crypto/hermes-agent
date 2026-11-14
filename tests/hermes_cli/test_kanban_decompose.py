@@ -359,3 +359,37 @@ def test_clean_children_allows_25h_old_card(kanban_home):
 
 
 
+
+
+# --- all children refused: root converges instead of looping -------------
+
+
+def test_apply_fanout_closes_root_when_every_child_is_a_duplicate(kanban_home):
+    """Every child already exists -> no sibling cards, and the root must not be
+    left in triage (that is the re-dispatch loop that produced 10 cards for one
+    fix). It closes, pointing at the existing card."""
+    with kbc.connect() as conn:
+        existing = kb.create_task(conn, title="Repoint production jobs", assignee="peer")
+        root = kb.create_task(
+            conn, title="Repoint production jobs (root)", assignee="orchestrator",
+            triage=True,
+        )
+    outcome = decomp._apply_fanout(
+        root, {"tasks": [{"title": "repoint PRODUCTION jobs!", "assignee": "peer"}]},
+        _routing(), "orchestrator",
+    )
+    assert outcome.ok is True, outcome.reason
+    assert outcome.child_ids == []
+    assert "already exist" in outcome.reason
+    with kbc.connect() as conn:
+        root_row = kb.get_task(conn, root)
+        assert root_row.status == "done"
+        ids = [r["id"] for r in conn.execute(
+            "SELECT id FROM tasks WHERE id != ?", (root,)
+        )]
+        assert ids == [existing]  # no duplicate sibling created
+        comments = [c.body for c in kb.list_comments(conn, root)]
+        events = [e.kind for e in kb.list_events(conn, root)]
+    assert any(existing in c for c in comments), comments
+    assert "dedup_refused" in events
+    assert "completed" in events
