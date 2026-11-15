@@ -313,6 +313,13 @@ def test_request_changes_fails_closed_on_malformed_review_provenance(
 
 
 def test_reclaim_fails_safe_on_non_object_claim_provenance(conn) -> None:
+    """An unreadable ``claimed`` payload must not crash the retry decision.
+
+    The card was handed to review and its reviewer run is dying, so the lane
+    history — not the corrupt payload — decides where the retry lands: back in
+    ``review``. Falling back to ``ready`` here would re-dispatch implementation
+    work on a card that was already sent for review.
+    """
     task_id, _review = _claimed_review(conn, "Non-object claimed payload")
     with kb.write_txn(conn):
         conn.execute(
@@ -324,7 +331,7 @@ def test_reclaim_fails_safe_on_non_object_claim_provenance(conn) -> None:
     assert kb.reclaim_task(conn, task_id, signal_fn=lambda *_args: None)
     task = kb.get_task(conn, task_id)
     assert task is not None
-    assert task.status == "ready"
+    assert task.status == "review"
 
 
 @pytest.mark.parametrize(
