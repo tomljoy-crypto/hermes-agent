@@ -472,6 +472,26 @@ canonical_method("kanban.run", params=KanbanRunParams, result=KanbanRunResult,
                  doc="Native-owner only: admit the dispatcher's current claim on a kanban task.")
 
 
+class KanbanReadmitParams(Params):
+    board: str
+    task_id: str
+    run_id: int
+    claim_lock: str
+    re_admission: int
+    db: str | None = None
+
+
+class KanbanReadmitResult(Result):
+    session_id: str
+    receipt: AdmissionStatus
+    re_admission: int
+    cause: str
+
+
+canonical_method("kanban.readmit", params=KanbanReadmitParams, result=KanbanReadmitResult,
+                 doc="Native-owner only: re-admit a still-live claim its own restart interrupted.")
+
+
 class A2aForwardParams(Params):
     agent: str
     tenant: str
