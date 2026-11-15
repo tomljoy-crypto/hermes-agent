@@ -306,14 +306,15 @@ def test_kanban_worker_workspace_is_disposable_working_space(protected_home, mon
 def test_hermes_state_beside_a_kanban_workspace_is_still_refused(protected_home, monkeypatch):
     """The exemption is a component chain, not a substring: real state, the workspaces root
     and lookalikes stay refused, and so does a synthetic path at the real home."""
-    from tests.home_io_guard import HomeIOGuard
+    from tests.home_io_guard import _PAYLOAD_MANIFEST_STRS, HomeIOGuard
 
     guard = HomeIOGuard(lambda: [protected_home])
     workspace = _pre_made_workspace(protected_home, monkeypatch, "t_b83b86f3", "wt")
     workspace = workspace.parent
+    payload_dir = Path(_PAYLOAD_MANIFEST_STRS[-1]).parent  # the manifest beside this checkout
 
     refused = [
-        protected_home / "manifest.json",                                  # the real-home probe
+        protected_home / "manifest.json",                                  # not the payload path: exact-path allowance only
         protected_home / "kanban.db",                                      # the live board
         protected_home / "profiles" / "cody" / "config.yaml",
         protected_home / "kanban" / "workspaces",                          # the root itself
@@ -334,8 +335,25 @@ def test_hermes_state_beside_a_kanban_workspace_is_still_refused(protected_home,
     # ``$HOME/.hermes`` and check the reported state files. Nothing here touches the disk.
     real_home = (Path(os.path.expanduser("~")) / ".hermes").resolve()
     real_guard = HomeIOGuard(lambda: [real_home])
-    for name in ("manifest.json", "kanban.db", os.path.join("profiles", "cody", "config.yaml")):
+    for name in ("kanban.db", os.path.join("profiles", "cody", "config.yaml")):
         with pytest.raises(AssertionError, match="REAL hermes home"):
             real_guard.check(real_home / name)
+    # ``manifest.json`` is not Hermes state: it is the sealed-payload manifest that
+    # ``pm.environments._payload_manifest`` probes at ``<checkout>.parent/manifest.json``, and a
+    # checkout kept in the home (default install, task worktree) puts that file in the home. The
+    # guard therefore exempts exactly that probe — a read — and nothing else: a write edits the
+    # payload's own manifest, which Hermes never does, so it stays refused. Asserted from the
+    # exemption itself so the expectation holds for any checkout location (the run above may be a
+    # task worktree, where the same file is not under ``$HOME/.hermes`` at all).
+    payload_guard = HomeIOGuard(lambda: [payload_dir])
+    payload_guard.check(payload_dir / "manifest.json")
+    with pytest.raises(AssertionError, match="REAL hermes home"):
+        payload_guard.check(payload_dir / "manifest.json", destructive=True)
+    with pytest.raises(AssertionError, match="REAL hermes home"):
+        payload_guard.check(payload_dir / "kanban.db")  # the exemption is one exact file
+    # Location-independent statement of the same rule at the OPERATOR home: whatever the checkout
+    # location, changing ``~/.hermes/manifest.json`` is a write against real state and is refused.
+    with pytest.raises(AssertionError, match="REAL hermes home"):
+        real_guard.check(real_home / "manifest.json", destructive=True)
     # ... while the worker's own workspace under it is allowed.
     real_guard.check(real_home / "kanban" / "workspaces" / "t_b83b86f3" / "manifest.json")
