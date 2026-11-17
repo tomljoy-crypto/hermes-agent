@@ -281,8 +281,14 @@ def test_named_profile_restart_all_reaches_the_all_aware_branch(monkeypatch):
     assert called == [True]
 
 
-def test_a_supervised_attach_is_retried_not_parked(monkeypatch, capsys):
-    """78 parks the unit for good; "someone serves me right now" is a transient observation."""
+def test_a_supervised_attach_is_parked_not_retried(monkeypatch, capsys):
+    """An already-served profile under a supervisor parks (78) instead of retrying (75) forever.
+
+    "Someone serves me right now" used to be treated as a transient observation and retried
+    on exit 75 every RestartSec; with Restart=always + RestartForceExitStatus=75 that looped
+    the already-installed unit indefinitely (the "hermes-gateway.service restarting 7x" alert).
+    Park on exit 78 (RestartPreventExitStatus) while the host keeps serving the profile.
+    """
     owner = host_attach.HostGateway(4321, Path("/somewhere"), ("default", "other"))
     monkeypatch.setattr(
         "gateway.host_attach.decide",
@@ -293,8 +299,8 @@ def test_a_supervised_attach_is_retried_not_parked(monkeypatch, capsys):
     with pytest.raises(SystemExit) as exc:
         gw._attach_to_host_gateway_or_guard(force=False)
 
-    assert exc.value.code == gw.GATEWAY_SERVICE_RESTART_EXIT_CODE
-    assert exc.value.code != gw.GATEWAY_FATAL_CONFIG_EXIT_CODE
+    assert exc.value.code == gw.GATEWAY_FATAL_CONFIG_EXIT_CODE
+    assert exc.value.code != gw.GATEWAY_SERVICE_RESTART_EXIT_CODE
 
 
 def test_a_refusal_lands_in_the_profile_logs_not_only_on_stdout(monkeypatch, caplog):

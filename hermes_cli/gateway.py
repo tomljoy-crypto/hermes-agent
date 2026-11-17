@@ -4302,8 +4302,10 @@ def _attach_to_host_gateway_or_guard(force: bool = False, replace: bool = False)
     """``gateway run`` against the ONE host gateway: attach, rescan-then-attach, replace, or refuse.
 
     A profile the host process already serves has nothing to run: print who serves it and exit 0
-    without spawning anything. Under a service supervisor the SAME situation exits 75 instead, so
-    the unit is RETRIED rather than parked (see :func:`_host_decision_exit_code`).
+    without spawning anything. Under a service supervisor the SAME situation parks the unit on
+    GATEWAY_FATAL_CONFIG_EXIT_CODE (78) — not 75 — so the already-installed unit stops retrying
+    (RestartPreventExitStatus=78) instead of looping forever while the host keeps serving it
+    (see the "restarting 7x" alert). See :func:`_host_decision_exit_code` for the transient case.
 
     ``--replace`` and ``--force`` are the two escape hatches this guard must not eat: both return
     here so ``start_gateway`` can act on them (it owns the signalling and the PID claim).
@@ -4328,7 +4330,12 @@ def _attach_to_host_gateway_or_guard(force: bool = False, replace: bool = False)
             logger.warning("gateway run refused (exit %d): %s", code, decision.message)
             sys.exit(code)
         if _running_under_gateway_supervisor():
-            sys.exit(_host_decision_exit_code(decision))
+            # The host multiplexer already serves this profile ("nothing to start"): that is a
+            # permanent condition while the host runs, not a transient fault. Exiting 75 made
+            # systemd retry forever (RestartForceExitStatus=75) — see the "restarting 7x" alert:
+            # unbounded loop, 2366+ restarts, journal spam. Exit 78 instead so the unit parks
+            # via RestartPreventExitStatus=78 (no restart) while the host keeps serving it.
+            sys.exit(GATEWAY_FATAL_CONFIG_EXIT_CODE)
         sys.exit(0)
     # No host record (older gateway, unwritable lock dir): the config-derived refusal still applies.
     _guard_named_profile_under_multiplexer(force=force)
