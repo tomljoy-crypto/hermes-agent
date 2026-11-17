@@ -261,6 +261,16 @@ async def update_hermes():
         record_refusal_receipt(refusal)
         return response
 
+    # Fleet guard (update_deploy_gate): the spawned `hermes update` would refuse anyway, but silently, in the
+    # background, after this endpoint had answered ok. Say so here, before anything is spawned.
+    from hermes_cli.update_contract import UpdateRefusal
+    from hermes_cli.update_deploy_gate import refusal as _deploy_refusal
+
+    _gate = _deploy_refusal(_server_path("PROJECT_ROOT"))
+    if _gate is not None:
+        record_refusal_receipt(UpdateRefusal("deploy-gate", _gate, ""))
+        return _update_refused("update_not_in_place", _gate, "")
+
     existing = _ACTION_PROCS.get("hermes-update")
     if existing is not None and existing.poll() is None:
         response = {"ok": True, "pid": existing.pid, "name": "hermes-update", "already_running": True}

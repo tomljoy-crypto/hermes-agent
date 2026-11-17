@@ -2166,6 +2166,24 @@ def cmd_update(args):
         return
     gateway_mode = getattr(args, "gateway", False)
 
+    # Fleet guard: refuse BEFORE the lock, backup or any gateway pause (read-only; see update_deploy_gate).
+    from hermes_cli.update_deploy_gate import refusal as _deploy_refusal
+    _refused = _deploy_refusal(PROJECT_ROOT)
+    if _refused:
+        print(_refused, file=sys.stderr)
+        try:  # a durable `refused` receipt, like the other admission refusals
+            from hermes_cli.update_contract import UpdateRefusal, record_refusal_receipt
+            record_refusal_receipt(UpdateRefusal("deploy-gate", _refused, ""))
+        except Exception:  # health: allow BLE001 -- best-effort record; the exit code is the outcome
+            pass
+        if gateway_mode:
+            try:
+                from hermes_cli.update_cmd_fleet import _write_gateway_update_exit_code
+                _write_gateway_update_exit_code(False)
+            except Exception:  # health: allow BLE001 -- the refusal itself is the outcome
+                pass
+        sys.exit(2)
+
     _update_io_state = _install_hangup_protection(gateway_mode=gateway_mode)
     # Cross-process mutual exclusion: dashboard Update button, Tauri updater
     # and this command all mutate one checkout; two at once strand it

@@ -153,6 +153,118 @@ async def run_task(connection, params):
     return {'session_id': ref.session_id, 'receipt': asdict(receipt)}
 
 
+def _live_claim(path, params):
+    """Read-only: *params* name the card's current running attempt and its live claim.
+
+    The same rule ``build_kanban_policy`` admits a new attempt under: the task is running, this run
+    is its current one, and both rows carry the caller's ``claim_lock``. A re-admission must never
+    revive a claim that moved, closed or was taken over.
+    """
+    from hermes_cli import kanban_db as kb
+    with closing(sqlite3.connect(path.resolve().as_uri() + '?mode=ro', uri=True)) as conn:
+        conn.row_factory = sqlite3.Row
+        task = kb.get_task(conn, params['task_id'])
+        run = conn.execute('SELECT * FROM task_runs WHERE id=?', (params['run_id'],)).fetchone()
+        if (task is None or run is None or task.status != 'running' or run['status'] != 'running'
+                or task.current_run_id != params['run_id'] or run['task_id'] != task.id
+                or task.claim_lock != params['claim_lock'] or run['claim_lock'] != task.claim_lock):
+            raise RuntimeStoreError('stale_kanban_claim')
+        return task
+
+
+def readmission_cause(admission, result):
+    """Why *admission* may be re-admitted, or None when its settlement is final.
+
+    Re-admission replaces exactly one thing the owner took away: a turn its OWN restart or shutdown
+    interrupted (``gateway/session_bot_outcome.owner_stopped``), or an admission the owner left
+    unresolved (``unknown``, fenced by recovery and never replayed). A user's Stop, a failed turn and
+    a finished run have verdicts of their own and stay final — the caller relays their exit code.
+    """
+    if admission is None:
+        return None
+    if admission['status'] == 'unknown':
+        return 'the owner lost the admission unresolved (unknown)'
+    if admission['status'] != 'terminal' or admission.get('outcome') != 'interrupted':
+        return None
+    from gateway.session_bot_outcome import owner_stopped
+    if not owner_stopped(result or {}):
+        return None
+    return f'the owner stopped the turn ({(result or {}).get("interrupt_message")})'
+
+
+def _note_readmission(path, params, receipt, cause, seq):
+    """Record the re-admission on the board: a survived restart is visible, never silent."""
+    from hermes_cli.kanban_db_connect import connect_closing
+    from hermes_cli import kanban_db as kb
+    try:
+        with connect_closing(path) as conn, kb.write_txn(conn):
+            task = kb.get_task(conn, params['task_id'])
+            if (task is None or task.current_run_id != params['run_id']
+                    or task.claim_lock != params['claim_lock']):
+                return
+            kb._append_event(conn, task.id, 'owner_readmitted',
+                             {'admission_id': receipt.admission_id, 're_admission': seq, 'cause': cause},
+                             run_id=params['run_id'])
+    except sqlite3.Error:  # the note is observability; the re-admission is already committed
+        pass
+
+
+async def readmit_task(connection, params):
+    """Bind a still-live claim to a fresh admission after the owner's own restart interrupted its turn.
+
+    Bounded re-admission, not a wider claim model: the card must still be this run under this
+    ``claim_lock``, the session must be the one ``kanban.run`` created for the attempt, and the
+    admission being replaced must have settled with the owner's restart/shutdown cause (or been left
+    ``unknown``). The new request id is chained (``kanban:<attempt>#readmit<n>``), so a retried call
+    returns the admission it already made instead of admitting the card twice.
+    """
+    if not connection.native_owner or 'session:create' not in connection.actor.capabilities:
+        raise RuntimeStoreError('permission_denied')
+    if (set(params) not in ({'board', 'task_id', 'run_id', 'claim_lock', 're_admission'},
+                            {'board', 'task_id', 'run_id', 'claim_lock', 're_admission', 'db'})
+            or any(not isinstance(params.get(k), str) or not params.get(k)
+                   for k in ('board', 'task_id', 'claim_lock'))
+            or type(params.get('run_id')) is not int
+            or type(params.get('re_admission')) is not int or params['re_admission'] < 1):
+        raise RuntimeStoreError('invalid_params')
+    from hermes_cli import kanban_db as kb
+    from hermes_cli.profiles import resolve_profile_env
+    from gateway.session_local_recovery import local_identity, restore_local_session
+    from gateway.session_contract import Submission
+    from gateway.session_results import admission_result
+    from hermes_state_runtime import find_session_admission
+    authority = connection.authority
+    if connection.actor.profile_id != authority.profile_id:
+        raise RuntimeStoreError('profile_mismatch')
+    board = kb._require_slug(params['board'])
+    try:
+        path = Path(params['db']).resolve(strict=True) if 'db' in params else kb.kanban_db_path(board=board).resolve()
+    except (ValueError, OSError) as exc:
+        raise RuntimeStoreError('invalid_kanban_claim') from exc
+    task = await asyncio.to_thread(_live_claim, path, params)
+    if not task.assignee or Path(resolve_profile_env(task.assignee)).resolve() != Path(authority.profile_id).resolve():
+        raise RuntimeStoreError('profile_mismatch')
+    attempt = 'kanban:' + json.dumps([board, params['task_id'], params['run_id']], separators=(',', ':'))
+    seq = params['re_admission']
+    sid = local_identity(authority.profile_id, connection.actor.subject, attempt)
+    if authority.db.get_session(sid) is None:
+        raise RuntimeStoreError('readmission_refused')
+    previous = attempt if seq == 1 else f'{attempt}#readmit{seq - 1}'
+    prior = await asyncio.to_thread(find_session_admission, authority.db,
+                                    principal_id=connection.actor.subject, session_id=sid, request_id=previous)
+    settled = None if prior is None else await asyncio.to_thread(admission_result, authority.db, prior['admission_id'])
+    cause = await asyncio.to_thread(readmission_cause, prior, (settled or {}).get('result'))
+    if cause is None:
+        raise RuntimeStoreError('readmission_refused')
+    ref = restore_local_session(authority, sid)
+    payload = {'text': f'work kanban task {params["task_id"]}', 'finite': True}
+    card = {'board': board, 'task_id': params['task_id'], 'run_id': params['run_id']}
+    receipt = await authority.submit(connection.actor, Submission(f'{attempt}#readmit{seq}', ref, payload, 'queue'),
+                                     _kanban_card=card)
+    await asyncio.to_thread(_note_readmission, path, params, receipt, cause, seq)
+    return {'session_id': sid, 'receipt': asdict(receipt), 're_admission': seq, 'cause': cause}
+
+
 def bind_worker_context(frame):
     """Only the adopted private exec calls this, before tool discovery imports."""
     import os

@@ -232,7 +232,7 @@ class AuthorityConnection:
                     'bot_relay.settle': self.bot_settle, 'bot_relay.cancel': self.bot_cancel,
                     'bot_relay.roster.sync': self.bot_roster, 'bot_relay.outbox.drain': self.bot_outbox,
                     'bot_relay.reply': self.bot_reply, 'a2a.forward': self.a2a_forward,
-                    'kanban.run': self.kanban_run,
+                    'kanban.run': self.kanban_run, 'kanban.readmit': self.kanban_readmit,
                     'cron.submit': self.cron_submit, 'cron.status': self.cron_status,
                     'cron.cancel': self.cron_cancel, 'cron.recover': self.cron_recover,
                     'worker.register': self.worker_register, 'worker.adopt': self.worker_adopt,
@@ -399,6 +399,10 @@ class AuthorityConnection:
     async def kanban_run(self, ref, params):
         from gateway.session_kanban import run_task
         return await run_task(self, params)
+
+    async def kanban_readmit(self, ref, params):
+        from gateway.session_kanban import readmit_task
+        return await readmit_task(self, params)
 
     async def cron_recover(self, ref, params):
         from gateway.session_cron import rpc
