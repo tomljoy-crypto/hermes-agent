@@ -51,3 +51,20 @@ def test_assume_unchanged_is_refused(repo):
 
 def test_non_git_dir_is_ignored(tmp_path):
     assert gate.refusal(tmp_path) is None
+
+
+def test_dashboard_update_is_refused_before_spawning(monkeypatch):
+    """POST /api/hermes/update must say no itself, not answer ok and fail silently in the background."""
+    import asyncio
+
+    from hermes_cli.web_routers import actions
+
+    spawned = []
+    monkeypatch.setattr(actions, "_spawn_hermes_action", lambda *a, **k: spawned.append(a))
+    monkeypatch.setattr(actions, "is_commit_build", lambda root: False)
+    monkeypatch.setattr(actions, "_dashboard_local_update_managed_externally", lambda: False)
+    monkeypatch.setattr("hermes_cli.update_contract.evaluate_update_admission", lambda root: None)
+    monkeypatch.setattr("hermes_cli.update_contract.record_refusal_receipt", lambda r: None)
+    monkeypatch.setattr(gate, "refusal", lambda root: "✗ refused for the test. No gateway was stopped.")
+    out = asyncio.run(actions.update_hermes())
+    assert out["ok"] is False and "No gateway was stopped" in out["message"] and not spawned
