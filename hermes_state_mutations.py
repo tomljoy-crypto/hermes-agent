@@ -1,6 +1,7 @@
 """Closed action handlers inside the runtime mutation receipt transaction."""
 import time
 from hermes_state_runtime import RuntimeStoreError
+from hermes_state_sessions import _LINEAGE_CTE_SQL
 
 METADATA_FIELDS = {'title': str, 'archived': bool, 'hidden': bool, 'pinned': bool, 'unread': bool}
 
@@ -104,9 +105,25 @@ def apply_action(db, conn, session_id, operation, payload, *, prepared=None):
     result = {}
     for key, value in payload.items():
         if key == 'title':
-            affected.update(db._set_session_title_in_transaction(
-                conn, session_id, value, source=db.TITLE_SOURCE_USER))
-            result[key] = conn.execute('SELECT title FROM sessions WHERE id=?', (session_id,)).fetchone()[0]
+            # The listing shows a compressed conversation under its live tip's title, so a rename
+            # addressed to an ended segment (a stale tab/row) lands there (#152624). Every segment
+            # can now rename that tip, so a committed rename advances the whole lineage's revision,
+            # as the lineage-wide flags below do: a client holding any segment's older copy refuses.
+            tip = db._compression_tip_on(conn, session_id)
+            written = db._set_session_title_in_transaction(conn, tip, value, source=db.TITLE_SOURCE_USER)
+            # A row the uniqueness rule freed the name from (an empty chat, a retired Bot Chat) changed too.
+            affected.update(written)
+            if written:
+                lineage = [row[0] for row in conn.execute(
+                    _LINEAGE_CTE_SQL + 'SELECT id FROM lineage', (session_id, session_id))]
+                affected.update(lineage)
+                if not db.sanitize_title(value):
+                    # An untitled tip lists under an ancestor's title, so a clear clears the lineage,
+                    # each row through the same title rules (the canonical Bot Chat's name refuses).
+                    for sid in lineage:
+                        affected.update(db._set_session_title_in_transaction(
+                            conn, sid, value, source=db.TITLE_SOURCE_USER))
+            result[key] = conn.execute('SELECT title FROM sessions WHERE id=?', (tip,)).fetchone()[0]
         else:
             column = 'last_read_at' if key == 'unread' else key
             stored = (0.0 if value else time.time()) if key == 'unread' else int(value)
@@ -152,7 +169,7 @@ def _rewind(db, conn, session_id, payload):
     target = db._row_to_message_dict(target, warn_context='rewind receipt', summary_flag=True)
     if live is not None:
         target['content'] = live.get('content')
-    from agent.message_metadata import typed_prompt_content  # /retry, /undo: the typed ask, not the placeholder
+    from session_rules.turns import typed_prompt_content  # /retry, /undo: the typed ask, not the placeholder
     target['content'] = typed_prompt_content(target.get('content'), target)
     conn.execute('UPDATE sessions SET runtime_generation=runtime_generation+1 WHERE id=?', (session_id,))
     return {session_id, physical}, {'rewound_count': len(ids), 'target_message': target,
@@ -190,7 +207,7 @@ def _summarized_by_compaction(conn, physical, message_id):
 
 
 def _carrier_live_view(db, conn, session_id, message_id):
-    from agent.context_compressor import split_user_originated_turn
+    from session_rules.turns import split_user_originated_turn
     row = conn.execute('SELECT * FROM messages WHERE id=? AND session_id=? AND active=1',
                        (message_id, session_id)).fetchone()
     message = row and db._row_to_message_dict(row, warn_context='rewind target', summary_flag=True)

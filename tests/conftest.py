@@ -533,7 +533,9 @@ def _close_leaked_session_dbs():
     Instances opened through ``hermes_state_registry.acquire()`` are skipped:
     on those ``close()`` releases a refcount rather than closing, so a sweep
     would silently retire a shared generation that a wider-scoped fixture
-    still holds. The registry owns that lifecycle (``close_all()``).
+    still holds. The registry owns that lifecycle (``close_all()``). A
+    ``SessionDB(path)`` that took its own reference is swept: its ``close()``
+    returns that one reference, once, and never another holder's.
 
     Before the sweep, the auto-title upgrade threads a turn spawned are joined
     (bounded): they hold the turn's SessionDB and write to it (and print to
@@ -556,7 +558,7 @@ def _close_leaked_session_dbs():
     if not registry:
         return
     for db in list(registry):
-        if getattr(db, "_shared_registry_owned", False):
+        if getattr(db, "_shared_registry_owned", False) and getattr(db, "_reference", None) is None:
             continue
         try:
             db.close()
@@ -748,14 +750,22 @@ def scratch_prune_spawns(monkeypatch):
 # without this fixture.
 
 
+# Both modules that open state.db keep their own copy of the guard knobs.
+_STATE_DB_GUARD_MODULES = ("hermes_state", "persistence.sqlite._holder")
+
+
 @pytest.fixture(autouse=True)
 def _state_db_write_guard(request, monkeypatch):
-    _hs = sys.modules.get("hermes_state")
-    if _hs is None or not hasattr(_hs, "_STATE_DB_GUARD_BYPASS"):
+    guarded = [
+        module for module in (sys.modules.get(name) for name in _STATE_DB_GUARD_MODULES)
+        if module is not None and hasattr(module, "_STATE_DB_GUARD_BYPASS")
+    ]
+    if not guarded:
         yield
         return
     if request.node.get_closest_marker("live_system_guard_bypass") is not None:
-        monkeypatch.setattr(_hs, "_STATE_DB_GUARD_BYPASS", True)
+        for module in guarded:
+            monkeypatch.setattr(module, "_STATE_DB_GUARD_BYPASS", True)
         yield
         return
     extra_roots = []
@@ -765,9 +775,8 @@ def _state_db_write_guard(request, monkeypatch):
         extra_roots.append(
             Path(_PRE_SANDBOX_HERMES_HOME).expanduser().resolve()
         )
-    monkeypatch.setattr(
-        _hs, "_STATE_DB_GUARD_EXTRA_DENY_ROOTS", tuple(extra_roots)
-    )
+    for module in guarded:
+        monkeypatch.setattr(module, "_STATE_DB_GUARD_EXTRA_DENY_ROOTS", tuple(extra_roots))
     yield
 
 
@@ -905,6 +914,29 @@ def authority_cwd_in_tmp(tmp_path, monkeypatch):
     created ``<cwd>/<id>/`` in the checkout. Opt-in (``usefixtures``), never autouse: most tests rely
     on the checkout as cwd."""
     monkeypatch.chdir(tmp_path)
+
+
+@pytest.fixture(autouse=True)
+def _checkout_home_guard(monkeypatch):
+    """Fail a test that seeds a Hermes home inside the repo checkout. A symbolic ``profile_id``
+    ('owned', 'fixture', ...) bound as a home is a RELATIVE path: its first config load seeded
+    ``<cwd>/<id>/SOUL.md`` into the checkout, and such files got committed. The seed is skipped
+    (nothing lands in the tree) and the test fails at teardown, since the scoped reads that hit
+    this swallow their own errors. Fix: ``usefixtures('authority_cwd_in_tmp')``."""
+    from hermes_cli import config_home
+    original, root, hits = config_home.initialize_home, PROJECT_ROOT.resolve(), []
+
+    def guarded(home, *args, **kwargs):
+        if Path(home).resolve().is_relative_to(root):
+            hits.append(str(home))
+            return None
+        return original(home, *args, **kwargs)
+
+    monkeypatch.setattr(config_home, "initialize_home", guarded)
+    yield
+    if hits:
+        pytest.fail(f"test seeded a Hermes home inside the repo checkout {root}: {sorted(set(hits))}; "
+                    "a symbolic profile_id is a relative home, use usefixtures('authority_cwd_in_tmp')")
 
 
 @pytest.fixture()

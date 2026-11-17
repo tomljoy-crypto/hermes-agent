@@ -84,7 +84,7 @@ canonical_method("prompt.resolve_unknown", params=PromptResolveUnknownParams, re
 
 
 class SessionMutateParams(Params):
-    """``operation`` + ``payload`` are validated by ``hermes_state_mutations.validate_action``;
+    """``operation`` + ``payload`` are validated by ``persistence.authority.runtime.parse_mutation``;
     ``expected_generation`` is required for delete/rewind/reset/branch/model/compress/reasoning/workspace.
     ``reasoning`` (``{effort}``) and ``workspace`` (``{cwd}``, refused ``session_busy`` mid-turn) rewrite
     the session's frozen policy: session-scope ``/reasoning`` and Desktop's Move to project. ``edit_policy``
@@ -114,7 +114,7 @@ canonical_method("session.mutate", params=SessionMutateParams, result=SessionMut
 
 
 class SessionPruneParams(Params):
-    """Exactly one of ``filters`` (``SessionDB.prune_sessions`` keyword filters, as
+    """Exactly one of ``filters`` (``older_than_days``, ``source`` and ``PruneCriteria`` fields, as
     ``hermes sessions prune`` builds them) or ``never_active_days`` (``--never-active``)."""
 
     filters: dict[str, JsonValue] | None = None
@@ -515,6 +515,26 @@ class KanbanRunResult(Result):
 
 canonical_method("kanban.run", params=KanbanRunParams, result=KanbanRunResult,
                  doc="Native-owner only: admit the dispatcher's current claim on a kanban task.")
+
+
+class KanbanReadmitParams(Params):
+    board: str
+    task_id: str
+    run_id: int
+    claim_lock: str
+    re_admission: int
+    db: str | None = None
+
+
+class KanbanReadmitResult(Result):
+    session_id: str
+    receipt: AdmissionStatus
+    re_admission: int
+    cause: str
+
+
+canonical_method("kanban.readmit", params=KanbanReadmitParams, result=KanbanReadmitResult,
+                 doc="Native-owner only: re-admit a still-live claim its own restart interrupted.")
 
 
 class A2aForwardParams(Params):

@@ -731,8 +731,14 @@ include = [
   "hermes_agent.*",
   "pm",
   "pm.*",
+  "persistence",
+  "persistence.*",
+  "session_rules",
+  "session_rules.*",
   "tools",
   "tools.*",
+  "utils",
+  "utils.*",
 ]
 
 [tool.setuptools.package-data]

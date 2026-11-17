@@ -93,10 +93,10 @@ class TestMintAndRestore:
     def test_legacy_rows_are_backfilled_in_bounded_slices_across_opens(self, tmp_path, monkeypatch):
         """A single full-table UPDATE held the write lock for minutes on a large store; each open now
         mints at most one chunk past its time budget, keeps earlier uids, and converges."""
-        import hermes_state_schema
+        from persistence.sqlite import _schema
 
-        monkeypatch.setattr(hermes_state_schema, "_MESSAGE_UID_BACKFILL_CHUNK", 2)
-        monkeypatch.setattr(hermes_state_schema, "_MESSAGE_UID_BACKFILL_BUDGET_S", 0.0)
+        monkeypatch.setattr(_schema, "_MESSAGE_UID_BACKFILL_CHUNK", 2)
+        monkeypatch.setattr(_schema, "_MESSAGE_UID_BACKFILL_BUDGET_S", 0.0)
         path = tmp_path / "legacy.db"
         first = SessionDB(db_path=path)
         try:
@@ -127,9 +127,9 @@ class TestMintAndRestore:
         like (#141467)."""
         import sqlite3
 
-        import hermes_state_schema
+        from persistence.sqlite import _schema
 
-        monkeypatch.setattr(hermes_state_schema, "_MESSAGE_UID_BACKFILL_CHUNK", 2)
+        monkeypatch.setattr(_schema, "_MESSAGE_UID_BACKFILL_CHUNK", 2)
         path = tmp_path / "legacy.db"
         conn = sqlite3.connect(path)
         conn.executescript(_JSONL_CONVERTED_STORE_SQL)
@@ -262,7 +262,7 @@ class TestPersistedMergeWitness:
     survivor's row, so a consumer that restarts after the merge still knows the composite's constituents."""
 
     def test_flushed_survivor_persists_the_absorbed_uids_and_restore_returns_them(self, db):
-        from agent.agent_runtime_helpers import _merge_consecutive_users
+        from session_rules.turns import _merge_consecutive_users
 
         db.create_session("s", "cli")
         dangling = {"role": "user", "content": "first, never answered"}
@@ -523,8 +523,7 @@ def test_one_response_repeating_a_provider_id_shares_one_uid_its_results_all_car
 def test_a_fold_after_a_shared_uid_row_keeps_each_call_aligned_with_its_uid():
     """The shared uid fills each of the row's own slots before the absorbed turn's occurrence is appended, so
     the absorbed call (third) keeps its own uid instead of sliding onto the second."""
-    from agent.agent_runtime_helpers import _merge_consecutive_assistants
-    from agent.message_metadata import index_tool_call_uids, resolve_tool_call_uid
+    from session_rules.turns import _merge_consecutive_assistants, index_tool_call_uids, resolve_tool_call_uid
 
     shared, own = "1" * 32, "2" * 32
     first = {"role": "assistant", "content": "", "tool_calls": [_call("call_x"), _call("call_x")],

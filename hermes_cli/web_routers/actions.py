@@ -261,6 +261,16 @@ async def update_hermes():
         record_refusal_receipt(refusal)
         return response
 
+    # Fleet guard (update_deploy_gate): the spawned `hermes update` would refuse anyway, but silently, in the
+    # background, after this endpoint had answered ok. Say so here, before anything is spawned.
+    from hermes_cli.update_contract import UpdateRefusal
+    from hermes_cli.update_deploy_gate import refusal as _deploy_refusal
+
+    _gate = _deploy_refusal(_server_path("PROJECT_ROOT"))
+    if _gate is not None:
+        record_refusal_receipt(UpdateRefusal("deploy-gate", _gate, ""))
+        return _update_refused("update_not_in_place", _gate, "")
+
     existing = _ACTION_PROCS.get("hermes-update")
     if existing is not None and existing.poll() is None:
         response = {"ok": True, "pid": existing.pid, "name": "hermes-update", "already_running": True}
@@ -382,6 +392,34 @@ def _completed_exit_code(
     return None
 
 
+def _import_report(log_path: Path, pid: Optional[int]) -> dict[str, Any]:
+    """What a keep-host import reported in its own section of the action log (the one this dashboard
+    spawned as *pid*): its undo point as soon as it exists (also when the import fails), the
+    messaging platforms ``--messaging-off`` switched off, and a gateway that did not start again."""
+    from hermes_cli.backup_keep_host import GATEWAY_DOWN_LINE, MESSAGING_OFF_LINE, UNDO_POINT_LINE
+    from hermes_cli.web_server_gateway import _ACTION_LOG_STARTS
+    report: dict[str, Any] = {"undo_archive": None}
+    start = _ACTION_LOG_STARTS.get("import")
+    if start is None or start[0] != pid:
+        return report
+    try:
+        with log_path.open("rb") as log:
+            log.seek(start[1])
+            section = log.read(_ACTION_LOG_TAIL_MAX_BYTES).decode("utf-8", errors="replace")
+    except OSError:
+        return report
+    lines = section.lstrip("\n").split("\n=== import started", 1)[0].splitlines()
+    report["undo_archive"] = next((line[len(UNDO_POINT_LINE):].strip() for line in lines
+                                   if line.startswith(UNDO_POINT_LINE)), None)
+    off = next((line[len(MESSAGING_OFF_LINE):] for line in lines if line.startswith(MESSAGING_OFF_LINE)), None)
+    if off is not None:
+        report["messaging_off"] = [name.strip() for name in off.split(",") if name.strip()]
+    down = next((line[len(GATEWAY_DOWN_LINE):].strip() for line in lines if line.startswith(GATEWAY_DOWN_LINE)), None)
+    if down is not None:
+        report["gateway_down"] = down
+    return report
+
+
 @status_router.get("/api/actions/{name}/status")
 async def get_action_status(name: str, lines: int = 200):
     """Tail an action log and report whether the process is still running."""
@@ -437,6 +475,8 @@ async def get_action_status(name: str, lines: int = 200):
             _finish_action(name, exit_code, pid)
 
     response = {"name": name, "running": running, "exit_code": exit_code, "pid": pid, "lines": tail}
+    if name == "import":
+        response.update(_import_report(log_dir / log_file_name, pid))
     if durable_update_action_id:
         response["action_id"] = durable_update_action_id
     if update_receipt_summary is not None:

@@ -20,9 +20,12 @@ from pathlib import Path
 import pytest
 
 import hermes_state
+import hermes_state_guard
+import persistence_assembly
 from gateway.config import GatewayConfig
 from gateway.session import SessionStore
 from hermes_state import SessionDB
+from persistence.sqlite import _holder
 
 # These probe the live-DB guard against the real root on purpose.
 pytestmark = pytest.mark.allow_real_home_io
@@ -32,7 +35,7 @@ pytestmark = pytest.mark.allow_real_home_io
 # ``%LOCALAPPDATA%\hermes``: the paths under test were then *correctly*
 # classified as non-production, so the guard never raised and the whole
 # TestProductionPathRefused class failed for the wrong reason (#82770).
-REAL_ROOT = hermes_state._real_platform_state_root()
+REAL_ROOT = hermes_state_guard._real_platform_state_root()
 if REAL_ROOT is None:  # pragma: no cover - no resolvable home on this platform
     pytest.skip(
         "no real platform state root to assert against", allow_module_level=True
@@ -102,7 +105,7 @@ class TestBypassMarker:
         Drives the guard function directly (never actually opens the live
         DB) — with the bypass marker active it must not raise.
         """
-        hermes_state._ensure_test_isolation(REAL_ROOT / "state.db")
+        _holder._ensure_test_isolation(REAL_ROOT / "state.db")
 
 
 class TestSessionStoreLoudFailure:
@@ -111,7 +114,7 @@ class TestSessionStoreLoudFailure:
     ):
         """SessionStore must re-raise the guard error, not degrade to JSONL.
 
-        The historical failure mode: SessionDB() blew up (or silently
+        The historical failure mode: the store open blew up (or silently
         opened the live DB) inside SessionStore.__init__'s blanket
         ``except Exception`` and the gateway carried on. A guard trip must
         be loud.
@@ -122,7 +125,7 @@ class TestSessionStoreLoudFailure:
                 "live-system guard: test attempted to open production state.db"
             )
 
-        monkeypatch.setattr(hermes_state, "SessionDB", _boom)
+        monkeypatch.setattr(persistence_assembly, "open_persistence", _boom)
         with pytest.raises(RuntimeError, match="live-system guard"):
             SessionStore(sessions_dir=tmp_path, config=GatewayConfig())
 
@@ -134,9 +137,10 @@ class TestSessionStoreLoudFailure:
         def _boom(*args, **kwargs):
             raise RuntimeError("disk on fire")
 
-        monkeypatch.setattr(hermes_state, "SessionDB", _boom)
+        monkeypatch.setattr(persistence_assembly, "open_persistence", _boom)
         store = SessionStore(sessions_dir=tmp_path, config=GatewayConfig())
         assert store._db is None
+        assert store.persistence is None
 
 
 class TestSubprocessChildCovered:

@@ -67,6 +67,18 @@ with a name allows that one name only.
 | `tools.browser_supervisor_capture` | whole module | developer-guide / plugins docs |
 | `tools.computer_use.backend` | whole module | developer-guide / plugins docs |
 | `tools.registry` | whole module | developer-guide / plugins docs |
+| `persistence` | whole module | developer-guide/plugins/index.md § `hermes_state` deprecated: the storage interface replacements |
+| `persistence.conversation.messages` | whole module | developer-guide/plugins/index.md § `hermes_state` deprecated: the storage interface replacements |
+| `persistence.conversation.search` | whole module | developer-guide/plugins/index.md § `hermes_state` deprecated: the storage interface replacements |
+| `persistence.conversation.sessions` | whole module | developer-guide/plugins/index.md § `hermes_state` deprecated: the storage interface replacements |
+| `persistence.housekeeping.maintenance` | whole module | developer-guide/plugins/index.md § `hermes_state` deprecated: the storage interface replacements |
+| `persistence.housekeeping.state_meta` | whole module | developer-guide/plugins/index.md § `hermes_state` deprecated: the storage interface replacements |
+| `persistence_assembly` | whole module | developer-guide/plugins/index.md § `hermes_state` deprecated: the storage interface replacements |
+| `sqlite_support` | `apply_wal_with_fallback` | developer-guide/plugins/index.md § `hermes_state` deprecated: the storage interface replacements |
+| `sqlite_support` | `apply_database_pragmas` | developer-guide/plugins/index.md § `hermes_state` deprecated: the storage interface replacements |
+| `storage_errors` | `classify_persistence_error` | developer-guide/plugins/index.md § `hermes_state` deprecated: the storage interface replacements |
+| `storage_errors` | `is_sqlite_lock_error` | developer-guide/plugins/index.md § `hermes_state` deprecated: the storage interface replacements |
+| `storage_errors` | `is_malformed_db_error` | developer-guide/plugins/index.md § `hermes_state` deprecated: the storage interface replacements |
 | `agent.context_references` | whole module | PluginContext (hermes_cli/plugins_context.py) |
 | `agent.plugin_llm` | whole module | PluginContext (hermes_cli/plugins_context.py) |
 | `agent.transcription_provider` | whole module | PluginContext (hermes_cli/plugins_context.py) |
@@ -129,6 +141,8 @@ with a name allows that one name only.
 | `hermes_yaml` | `safe_load` | plugins/index.md § Check file paths and read YAML with Hermes's own helpers |
 | `hermes_yaml` | `safe_dump` | plugins/index.md § Check file paths and read YAML with Hermes's own helpers |
 | `hermes_cli.urllib_security` | `open_credentialed_url` | plugins/index.md § Send a credentialed HTTP request without leaking it on redirect |
+| `agent.retry_utils` | `parse_retry_after_seconds` | plugins/index.md § Read a Retry-After header the way Hermes does |
+| `hermes_cli.version_info` | `hermes_user_agent` | plugins/index.md § Send the Hermes User-Agent header |
 | `hermes_cli.chat_launch` | `hermes_command` | user-guide/features/plugins.md § A plugin with its own chat client |
 | `hermes_cli.chat_launch` | `print_exit_summary` | user-guide/features/plugins.md § A plugin with its own chat client |
 | `hermes_cli.gateway_chat` | `shell_client_env` | user-guide/features/plugins.md § A plugin with its own chat client |
