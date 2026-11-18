@@ -2176,6 +2176,35 @@ def _home_owns_bare_service_name(home: Path) -> bool:
     return home in _native_service_homes() or home == _bare_unit_pinned_home()
 
 
+def _default_service_unit_adopted(home: Path) -> bool:
+    """True on Linux when bare ``hermes-gateway.service`` is absent and an installed
+    ``hermes-gateway-default.service`` serves *home* (or root's native home pre-sync).
+    """
+    if not is_linux():
+        return False
+    root_caller = os.geteuid() == 0  # windows-footgun: ok — behind is_linux()
+    search_dirs = (_SYSTEM_UNIT_DIR,) if root_caller else (user_systemd_unit_dir(), _SYSTEM_UNIT_DIR)
+    for unit_dir in search_dirs:
+        if (unit_dir / f"{_SERVICE_BASE}.service").exists():
+            return False
+    native = _native_service_homes()
+    default_unit_name = f"{_SERVICE_BASE}-default.service"
+    for unit_dir in search_dirs:
+        candidate = unit_dir / default_unit_name
+        if not candidate.exists():
+            continue
+        pinned = _hermes_home_pinned_by_unit(candidate)
+        if not pinned:
+            return home in native
+        try:
+            pinned_resolved = Path(pinned).expanduser().resolve()
+        except (RuntimeError, ValueError):
+            continue
+        if pinned_resolved == home or (root_caller and pinned_resolved in native and home in native):
+            return True
+    return False
+
+
 def _profile_suffix() -> str:
     """Service-name suffix for HERMES_HOME: "" for a home that owns the bare name, the profile name for
     ``<root>/profiles/<name>``, else a short hash of the path.
@@ -2198,6 +2227,8 @@ def _profile_suffix() -> str:
     import hashlib
     from hermes_constants import get_default_hermes_root
     home = get_hermes_home().resolve()
+    if _default_service_unit_adopted(home):
+        return "default"
     if _home_owns_bare_service_name(home):
         return ""
     name = _profile_name_from_home(home, get_default_hermes_root().resolve())

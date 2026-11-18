@@ -555,8 +555,9 @@ def _pin_launcher_home() -> None:
     from ever running. The flag name is ``_launchers.PIN_DEFAULT_HOME_FLAG``."""
     if getattr(sys, "_hermes_pin_default_home", False) and not os.environ.get("HERMES_HOME"):
         from hermes_constants import get_default_hermes_root
+        from pm.environments import sudo_owner_dependency_home
 
-        os.environ["HERMES_HOME"] = str(get_default_hermes_root())
+        os.environ["HERMES_HOME"] = str(sudo_owner_dependency_home(_root) or get_default_hermes_root())
 
 
 _pin_launcher_home()
@@ -578,7 +579,8 @@ class RelaunchExit(SystemExit):
     relaunched = True
 
 
-from pm.environments import activate_dependencies, install_state_permission_message
+from hermes_constants import reset_hermes_home_override, set_hermes_home_override
+from pm.environments import activate_dependencies, install_state_permission_message, sudo_owner_dependency_home
 from hermes_cli._early_recovery import recover_if_needed
 
 from hermes_cli._parser import command_argv
@@ -588,39 +590,45 @@ _pm_repair = command_argv(sys.argv[1:])[:2] == ["pm", "repair"]
 if not _pm_repair:
     from hermes_cli.venv_sync import prepare_launch, relaunch_command
 
+    _sudo_dep_home = sudo_owner_dependency_home(_root)
+    _sudo_dep_token = set_hermes_home_override(_sudo_dep_home) if _sudo_dep_home is not None else None
     try:
-        _launch_python = prepare_launch(_root, sys.argv[1:])
-        if _launch_python is not None:
-            _main_spec = getattr(sys.modules.get("__main__"), "__spec__", None)
-            _command = relaunch_command(
-                _launch_python, _root, sys.argv, sys.orig_argv,
-                getattr(_main_spec, "name", None),
-            )
-            if os.name == "nt":
-                import subprocess
+        try:
+            _launch_python = prepare_launch(_root, sys.argv[1:])
+            if _launch_python is not None:
+                _main_spec = getattr(sys.modules.get("__main__"), "__spec__", None)
+                _command = relaunch_command(
+                    _launch_python, _root, sys.argv, sys.orig_argv,
+                    getattr(_main_spec, "name", None),
+                )
+                if os.name == "nt":
+                    import subprocess
 
-                raise RelaunchExit(subprocess.call(_command))
-            os.execv(str(_launch_python), _command)
-    except Exception as exc:
-        if isinstance(exc, PermissionError) and (message := install_state_permission_message(_root, exc)):
-            print(f"hermes: {message}", file=sys.stderr)
-            raise SystemExit(1) from None
-        # Degrade, never brick the CLI: the previous dependency generation is still selected
-        # (a failed sync commits nothing), so an offline or half-finished update leaves a
-        # usable Hermes plus a warning. Activation below is the real gate — a tree whose
-        # dependencies cannot load still exits with the repair remedy.
-        print(f"hermes: source-update completion failed: {exc}; "
-              "running with the previous dependencies — run `hermes update` to finish it",
-              file=sys.stderr)
-    try:
-        recover_if_needed(_root)
-        activate_dependencies(_root)
-    except (RuntimeError, OSError) as exc:
-        if isinstance(exc, PermissionError) and (message := install_state_permission_message(_root, exc)):
-            print(f"hermes: {message}", file=sys.stderr)
-            raise SystemExit(1) from None
-        if command_argv(sys.argv[1:])[:1] != ["pm"]:
-            print(f"hermes: {exc}; run `hermes pm repair`", file=sys.stderr)
-            raise SystemExit(1) from None
+                    raise RelaunchExit(subprocess.call(_command))
+                os.execv(str(_launch_python), _command)
+        except Exception as exc:
+            if isinstance(exc, PermissionError) and (message := install_state_permission_message(_root, exc)):
+                print(f"hermes: {message}", file=sys.stderr)
+                raise SystemExit(1) from None
+            # Degrade, never brick the CLI: the previous dependency generation is still selected
+            # (a failed sync commits nothing), so an offline or half-finished update leaves a
+            # usable Hermes plus a warning. Activation below is the real gate — a tree whose
+            # dependencies cannot load still exits with the repair remedy.
+            print(f"hermes: source-update completion failed: {exc}; "
+                  "running with the previous dependencies — run `hermes update` to finish it",
+                  file=sys.stderr)
+        try:
+            recover_if_needed(_root)
+            activate_dependencies(_root)
+        except (RuntimeError, OSError) as exc:
+            if isinstance(exc, PermissionError) and (message := install_state_permission_message(_root, exc)):
+                print(f"hermes: {message}", file=sys.stderr)
+                raise SystemExit(1) from None
+            if command_argv(sys.argv[1:])[:1] != ["pm"]:
+                print(f"hermes: {exc}; run `hermes pm repair`", file=sys.stderr)
+                raise SystemExit(1) from None
+    finally:
+        if _sudo_dep_token is not None:
+            reset_hermes_home_override(_sudo_dep_token)
 install_happy_eyeballs_socket_connect()
 export_scratch_tmp_env()

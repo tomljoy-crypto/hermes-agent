@@ -30,6 +30,30 @@ def dependency_home_root() -> Path:
     return get_default_hermes_root(home=override) if override else get_default_hermes_root()
 
 
+def sudo_owner_dependency_home(project_root: Path) -> Path | None:
+    """Return ``SUDO_USER``'s ``~/.hermes`` when elevated via ``sudo`` without an
+    explicit ``HERMES_HOME`` and root has no install state for *project_root* while
+    ``SUDO_USER`` owns it.
+
+    ``sudo`` strips ``HERMES_HOME`` and sets ``HOME=/root``, which otherwise causes
+    ``hermes_bootstrap`` to pin ``/root/.hermes`` as a borrowing root, fail the uid-0
+    check in ``refuse_foreign_owned_venv``, and fail ``activate_dependencies``.
+    """
+    from hermes_constants import get_default_hermes_root, get_hermes_home_override, sudo_invoker_default_home
+
+    if get_hermes_home_override() or os.environ.get("HERMES_HOME", "").strip():
+        return None
+    sudo_home = sudo_invoker_default_home()
+    if sudo_home is None:
+        return None
+    key = install_key(Path(project_root).resolve())
+    default_facts = get_default_hermes_root() / "installs" / key / "facts.json"
+    sudo_facts = sudo_home / "installs" / key / "facts.json"
+    if not default_facts.is_file() and sudo_facts.is_file():
+        return sudo_home
+    return None
+
+
 def installs_root() -> Path:
     return dependency_home_root() / "installs"
 
