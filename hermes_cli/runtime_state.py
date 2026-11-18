@@ -154,6 +154,11 @@ def lease_directory(generation: Path) -> Callable[[], None]:
     while True:
         lease = leases / uuid.uuid4().hex
         fd = os.open(lease, os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o600)
+        if hasattr(os, "fchown") and hasattr(os, "geteuid") and os.geteuid() == 0:
+            with suppress(OSError):
+                parent_stat = leases.stat()
+                if parent_stat.st_uid != 0:
+                    os.fchown(fd, parent_stat.st_uid, parent_stat.st_gid)
         try:
             _lock(fd, wait=True)
         except BaseException:

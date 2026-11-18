@@ -610,3 +610,54 @@ def test_task_discovery_reads_localized_schtasks_output(tmp_path, monkeypatch):
     monkeypatch.setattr(service, "_run", run)
     found = service.discover_existing_gateway_service(home, deadline=time.monotonic() + 5)
     assert found is not None and found.start_argv == ("schtasks.exe", "/Run", "/TN", name)
+
+
+@pytest.mark.platforms("linux")
+def test_systemd_adopts_default_named_unit_when_bare_absent(tmp_path, monkeypatch):
+    """``discover_existing_gateway_service`` checks ``hermes-gateway-default.service`` when the
+    default home has no bare ``hermes-gateway.service`` unit."""
+    from types import SimpleNamespace
+    import hermes_constants
+    from hermes_cli import gateway as gw, gateway_runtime_service as service
+
+    account = tmp_path / "tom"
+    home = account / ".hermes"
+    home.mkdir(mode=0o700, parents=True)
+    monkeypatch.setattr(hermes_constants, "_account_home", lambda: account)
+    monkeypatch.setattr(Path, "home", lambda: account)
+    default_sys_unit = Path("/etc/systemd/system/hermes-gateway-default.service")
+
+    monkeypatch.setattr(service, "_exists", lambda p: p == default_sys_unit)
+    monkeypatch.setattr(gw, "_systemctl_cmd", lambda system: ["systemctl"] if system else ["systemctl", "--user"])
+
+    seen = []
+
+    def fake_run(argv, *_args, **_kwargs):
+        seen.append(list(argv))
+        if "show" in argv:
+            if "--user" in argv:
+                return SimpleNamespace(returncode=0, stdout="LoadState=not-found\n", stderr="")
+            return SimpleNamespace(
+                returncode=0,
+                stdout=(
+                    "LoadState=loaded\n"
+                    "ActiveState=active\n"
+                    "SubState=running\n"
+                    "UnitFileState=enabled\n"
+                    "User=tom\nGroup=tom\nUID=1000\nGID=1000\n"
+                    "DynamicUser=no\nEnvironmentFiles=\nPAMName=\n"
+                    "RootDirectory=\nRootImage=\nExecStartPre=\nExecCondition=\n"
+                    f"ExecStart={{ path={sys.executable} ; argv[]={sys.executable} -m hermes_cli.main gateway run ; }}\n"
+                    f"Environment=HERMES_HOME={home}\n"
+                ),
+                stderr="",
+            )
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(service, "_run", fake_run)
+    monkeypatch.setattr("hermes_cli.gateway_runtime_service_identity.verify_systemd", lambda *a, **kw: None)
+    found = service.discover_existing_gateway_service(home, deadline=time.monotonic() + 5)
+    assert found is not None
+    assert found.backend == "systemd"
+    assert found.start_argv == ("systemctl", "--no-ask-password", "start", "hermes-gateway-default.service")
+    assert any("hermes-gateway-default.service" in cmd for cmd in seen)

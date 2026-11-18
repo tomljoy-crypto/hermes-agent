@@ -208,3 +208,58 @@ def test_the_owner_still_owes_and_runs_its_tail(tmp_path, monkeypatch, completio
     assert venv_sync.prepare_launch(root, []) == Path(sys.executable)
     assert len(completion_tail) == 1
     assert published == [root]
+
+
+def test_sudo_owner_dependency_home_resolves_invoker_install_without_root_state(tmp_path, monkeypatch):
+    """Under ``sudo`` without ``HERMES_HOME``, root falls back to SUDO_USER's install store
+    when /root/.hermes has no committed state for the checkout."""
+    from pm.environments import sudo_owner_dependency_home
+
+    root = _checkout(tmp_path, monkeypatch)
+    user_home = tmp_path / "tom" / ".hermes"
+    root_home = tmp_path / "root" / ".hermes"
+    _state(user_home, root)
+    root_home.mkdir(parents=True)
+
+    monkeypatch.delenv("HERMES_HOME", raising=False)
+    monkeypatch.setattr("hermes_constants.get_default_hermes_root", lambda **_: root_home)
+    monkeypatch.setattr("hermes_constants.sudo_invoker_default_home", lambda: user_home)
+
+    assert sudo_owner_dependency_home(root) == user_home
+
+    # If root already owns committed install state for this checkout, keep root's own store.
+    _state(root_home, root)
+    assert sudo_owner_dependency_home(root) is None
+
+    # Explicit HERMES_HOME always wins.
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "explicit"))
+    assert sudo_owner_dependency_home(root) is None
+
+
+def test_lease_directory_fchowns_to_nonroot_parent_when_root(tmp_path, monkeypatch):
+    """When root leases a user-owned generation, fchown the lease file to the directory owner."""
+    import os
+    from types import SimpleNamespace
+    from hermes_cli.runtime_state import lease_directory
+
+    gen = tmp_path / "gen"
+    gen.mkdir()
+    (gen / ".lease-managed").write_text("", encoding="utf-8")
+    fchown_calls = []
+
+    monkeypatch.setattr(os, "geteuid", lambda: 0, raising=False)
+    monkeypatch.setattr(os, "fchown", lambda fd, uid, gid: fchown_calls.append((fd, uid, gid)), raising=False)
+    orig_stat = Path.stat
+
+    def fake_stat(self, *args, **kwargs):
+        if self == gen / ".leases":
+            return SimpleNamespace(st_uid=1000, st_gid=1000)
+        return orig_stat(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", fake_stat)
+    release = lease_directory(gen)
+    try:
+        assert len(fchown_calls) == 1
+        assert fchown_calls[0][1:] == (1000, 1000)
+    finally:
+        release()
