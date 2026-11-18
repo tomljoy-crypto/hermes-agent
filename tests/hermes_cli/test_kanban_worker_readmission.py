@@ -49,6 +49,7 @@ class _Owner:
         self.dials = 0
         self.last_terminal = None
         self.rebound = False
+        self._connected = False
 
     def connect(self):
         owner = self
@@ -56,11 +57,14 @@ class _Owner:
         @asynccontextmanager
         async def _connect(*_, **__):
             owner.dials += 1
+            owner._connected = True
 
             class _Client:
                 events = asyncio.Queue()
 
                 async def rpc(self, method, **params):
+                    if not owner._connected:
+                        raise gateway_client.GatewayClientError(gateway_client.NOT_SENT)
                     owner.methods.append(method)
                     if method == "kanban.run":
                         return {"session_id": "s1", "receipt": {"status": "pending", "admission_id": "a1"}}
@@ -84,7 +88,10 @@ class _Owner:
                     owner.last_terminal = "a2"
                     return {"status": "terminal", "admission_id": "a2"}
 
-            yield _Client()
+            try:
+                yield _Client()
+            finally:
+                owner._connected = False
 
         return _connect
 

@@ -102,6 +102,8 @@ async def run(params, board_db):
         # keeps refusing, or one that never came back): the claim is unrecoverable, and says why.
         claim.expire_readmission()
         seen = claim.answered
+        readmitted = False
+        receipt = None
         try:
             # Never into a restart's after-turn wait: it cut this socket so the turn's submitter
             # waits for the NEXT owner, and a worker polling its receipt inside the wait keeps the
@@ -114,8 +116,11 @@ async def run(params, board_db):
                     drain = asyncio.create_task(_discard(client.events))
                     try:
                         receipt = await _await_receipt(client, params, board_db, claim)
+                        readmitted = await _readmit(client, params, board_db, claim, receipt)
                     finally:
                         drain.cancel()
+            if not readmitted:
+                return _exit_code(receipt, params, board_db)
         # A restart also surfaces as a refused or reset dial, a failed handshake, or an answer
         # that never came.
         except (GatewayClientError, WebSocketException, OSError, TimeoutError) as exc:
@@ -127,9 +132,6 @@ async def run(params, board_db):
                 detail = exc if isinstance(exc, GatewayClientError) else type(exc).__name__ + (
                     f' (HTTP {status})' if status else '')
                 raise GatewayClientError(f'Kanban owner silent for {claim.silent_for():.0f}s: {detail}') from exc
-        else:
-            if not await _readmit(client, params, board_db, claim, receipt):
-                return _exit_code(receipt, params, board_db)
         failures = 1 if claim.answered != seen else failures + 1
         # Jittered (1-2 s first, up to 16 s): workers of one dead owner do not all redial, and so
         # start a replacement, in the same instant.
