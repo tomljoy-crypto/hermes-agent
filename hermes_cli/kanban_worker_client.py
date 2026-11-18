@@ -22,6 +22,10 @@ from typing import Optional
 # ``OWNER_WAIT_S`` is the longest the owner may stay silent between answers before the worker
 # gives up (the first ``kanban.run`` answer has its own wait, ``admission_answer_budget``).
 OWNER_WAIT_S = 180.0
+_TRANSIENT_OWNER_STATES = frozenset({'draining', 'starting'})
+# In-band owner refusals that leave the attempt intact: a draining owner admits nothing new, and a
+# retired authority's successor holds the admission the next connection reads.
+_TRANSIENT_RPC_REASONS = frozenset({'runtime_draining', 'runtime_retired'})
 # Past the board lock wait: the owner's session setup and receipt before and after the write.
 ADMISSION_ANSWER_MARGIN_S = 60.0
 # A scoped worker outlives its owner: the process is its own systemd scope and its claim lease is the
@@ -102,6 +106,8 @@ async def run(params, board_db):
         # keeps refusing, or one that never came back): the claim is unrecoverable, and says why.
         claim.expire_readmission()
         seen = claim.answered
+        readmitted = False
+        receipt = None
         try:
             # Never into a restart's after-turn wait: it cut this socket so the turn's submitter
             # waits for the NEXT owner, and a worker polling its receipt inside the wait keeps the
@@ -114,8 +120,11 @@ async def run(params, board_db):
                     drain = asyncio.create_task(_discard(client.events))
                     try:
                         receipt = await _await_receipt(client, params, board_db, claim)
+                        readmitted = await _readmit(client, params, board_db, claim, receipt)
                     finally:
                         drain.cancel()
+            if not readmitted:
+                return _exit_code(receipt, params, board_db)
         # A restart also surfaces as a refused or reset dial, a failed handshake, or an answer
         # that never came.
         except (GatewayClientError, WebSocketException, OSError, TimeoutError) as exc:
@@ -127,9 +136,6 @@ async def run(params, board_db):
                 detail = exc if isinstance(exc, GatewayClientError) else type(exc).__name__ + (
                     f' (HTTP {status})' if status else '')
                 raise GatewayClientError(f'Kanban owner silent for {claim.silent_for():.0f}s: {detail}') from exc
-        else:
-            if not await _readmit(client, params, board_db, claim, receipt):
-                return _exit_code(receipt, params, board_db)
         failures = 1 if claim.answered != seen else failures + 1
         # Jittered (1-2 s first, up to 16 s): workers of one dead owner do not all redial, and so
         # start a replacement, in the same instant.
