@@ -406,13 +406,20 @@ class AIAgent(
         With ``previous_messages`` / ``old_session_id`` / ``carry_over_context`` the context engine gets the
         full transition lifecycle instead of a bare reset.
         """
-        for counter in (
-            "session_total_tokens", "session_input_tokens", "session_output_tokens", "session_prompt_tokens",
-            "session_completion_tokens", "session_cache_read_tokens", "session_cache_write_tokens",
-            "session_reasoning_tokens", "session_api_calls",
-        ):
-            setattr(self, counter, 0)
-        self.session_estimated_cost_usd = 0.0
+        from agent.prompt_cache_lifecycle import reset_prompt_cache_session, session_totals_lock
+
+        with session_totals_lock(self):  # a keep-alive in flight adds to these under the same lock
+            reset_prompt_cache_session(self)  # a fresh session: an old keep-alive miss no longer stops warming
+            for counter in (
+                "session_total_tokens", "session_input_tokens", "session_output_tokens", "session_prompt_tokens",
+                "session_completion_tokens", "session_cache_read_tokens", "session_cache_write_tokens",
+                "session_reasoning_tokens", "session_api_calls", "session_cache_warm_calls",
+            ):
+                setattr(self, counter, 0)
+            # Monotonic, unlike the counters it accompanies: a reply to a request sent before this
+            # reset (a cache keep-alive in flight) compares it to tell the old session from the new.
+            self._session_reset_epoch = getattr(self, "_session_reset_epoch", 0) + 1
+            self.session_estimated_cost_usd = 0.0
         self.session_cost_status = "unknown"
         self.session_cost_source = "none"
 
@@ -446,9 +453,10 @@ class AIAgent(
         if (engine is not None and hasattr(engine, "bind_session_state") and target_session_id
                 and target_session_id != getattr(engine, "_session_id", "")):
             try:
-                from agent.conversation_compression import context_engine_session_db
+                from agent.conversation_compression import context_engine_persistence, context_engine_session_db
                 engine.bind_session_state(context_engine_session_db(self, getattr(self, "_session_db", None)),
-                                          target_session_id)
+                                          target_session_id, **context_engine_persistence(
+                                              engine.bind_session_state, getattr(self, "persistence", None)))
             except Exception as exc:
                 logger.debug("context engine bind_session_state during reset: %s", exc)
 
@@ -953,6 +961,8 @@ class AIAgent(
         cache eviction: the session may resume on the same task_id, so processes, sandbox, browser and computer-use
         are kept). Idempotent; distinct from ``close()``."""
         self._close_active_children(soft=True)
+        from agent.prompt_cache_lifecycle import cancel_prompt_cache_warming
+        _quietly(cancel_prompt_cache_warming, self, "release_clients")
         # Retire (don't hard-close) the shared client: eviction runs on the gateway memory-manager thread,
         # and a cross-thread close can release TLS FDs under a still-unwinding worker.
         _quietly(self._drop_shared_client, lambda c: self._retire_shared_openai_client(c, reason="cache_evict"))
@@ -970,6 +980,8 @@ class AIAgent(
         blocks the rest."""
         session_messages = getattr(self, "_session_messages", None)
         _quietly(self.shutdown_memory_provider, session_messages if isinstance(session_messages, list) else None)
+        from agent.prompt_cache_lifecycle import cancel_prompt_cache_warming
+        _quietly(cancel_prompt_cache_warming, self, "agent_close")
         self._close_task_resources(getattr(self, "session_id", None) or "")
         self._close_active_children(soft=False)
         from agent.prepared_compaction import release_for_agent
@@ -1063,13 +1075,13 @@ class AIAgent(
             self._owns_session_db = False
             # A registry-lent store's close() releases one reference, so the registry closes on the last caller.
             # See #90837.
-            from persistence_beside import close_beside
             persistence, self.persistence = getattr(self, "persistence", None), None
             try:
                 if session_db is not persistence:
                     session_db.close()
             finally:
-                close_beside(persistence)
+                if persistence is not None:
+                    _quietly(persistence.close)
 
     def _hydrate_todo_store(self, history: list[dict[str, Any]]) -> None:
         """Replay the most recent todo tool response (the gateway builds a fresh AIAgent per message). Only

@@ -663,6 +663,7 @@ class GatewayTurnHygieneMixin:
         """Build the detached hygiene ``AIAgent`` with the live session's system prompt. Returns
         ``(agent, storage interface handle)``."""
         from gateway.run import _GATEWAY_HYGIENE_PLATFORM, _seed_hygiene_system_prompt
+        from agent.prompt_caching import refresh_auto_cache_ttl
         from run_agent import AIAgent
         try:
             _hyg_record = await self.persistence.aio.sessions.get(session_entry.session_id)
@@ -693,6 +694,7 @@ class GatewayTurnHygieneMixin:
         # restore-identity field, so it no longer forces the next live turn to rebuild; the seed's
         # retain flag is what keeps the reduced-toolset build out of the session row (#122822).
         _hyg_agent.platform = _GATEWAY_HYGIENE_PLATFORM
+        refresh_auto_cache_ttl(_hyg_agent)
         return _hyg_agent, _hyg_session_db
 
     async def _hmwa_hygiene_detached_attempt(
@@ -712,14 +714,11 @@ class GatewayTurnHygieneMixin:
             _hyg_engine = getattr(_hyg_agent, "context_compressor", None)
             _bind_hyg_state = getattr(_hyg_engine, "bind_session_state", None)
             if callable(_bind_hyg_state):
-                from agent.context_compressor import ContextCompressor
-                from agent.conversation_compression import context_engine_session_db
+                from agent.conversation_compression import context_engine_persistence, context_engine_session_db
 
-                # The built-in compressor also takes the store's interface handle; a plugin engine rebinds
-                # the SessionDB the agent bound it with, which the agent's close() closes.
-                _hyg_handle = {"persistence": _hyg_session_db} if isinstance(_hyg_engine, ContextCompressor) else {}
+                # A plugin engine rebinds the SessionDB the agent bound it with, which the agent's close() closes.
                 _bind_hyg_state(context_engine_session_db(_hyg_agent, _hyg_session_db), session_entry.session_id,
-                                **_hyg_handle)
+                                **context_engine_persistence(_bind_hyg_state, _hyg_session_db))
             # Never finalize on close() — that would end the live gateway session row.
             _hyg_agent._end_session_on_close = False
             _hyg_agent._print_fn = lambda *a, **kw: None

@@ -1892,10 +1892,10 @@ class GatewayShutdownMixin(GatewaySessionEndMixin, GatewayHomeShutdownNoticeMixi
             if _task is self._stop_task or _task is self._restart_task:
                 continue
             _task.cancel()
-        # The restart orchestration task is awaiting _stop_task right now; cancelling it would propagate
-        # CancelledError into this _stop_impl and skip _shutdown_event.set() / _exit_code = 75 (#12875). It
-        # self-terminates anyway.
+        # The restart task awaits _stop_task: cancelling it skips _shutdown_event.set() / _exit_code = 75 (#12875).
         self._background_tasks.clear()
+        from gateway.run_watchers import drain_pending_cache_releases
+        drain_pending_cache_releases(self)  # cache-edge jobs just cancelled (or never scheduled) owe a release
         ctx.api_live = self._active_api_run_count()
         self.adapters.clear()
         for _session_key in list(self._running_agents):
@@ -2002,7 +2002,6 @@ class GatewayShutdownMixin(GatewaySessionEndMixin, GatewayHomeShutdownNoticeMixi
             _step("SessionDB handle sweep error", _sweep)
         # Same sweep for the runner's own per-profile session_search handles.
         _step("Runner SessionDB handle sweep error", lambda: GatewayRunner.close_all_session_db_handles(self))
-        _step("Runner persistence handle sweep error", lambda: GatewayRunner.close_all_persistence_handles(self))
 
         def _close_shared() -> None:
             # Shared stores still held in the process-wide registry (tools, cron, mirror, the storage interface).

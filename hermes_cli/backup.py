@@ -20,12 +20,11 @@ from hermes_constants import (
 )
 from persistence.core.admin import AdminUnsupported
 from persistence_assembly import open_store_admin, profile_scope, store_exists
-from sqlite_support import RETIRED_GENERATION_DIR_SUFFIX
-from hermes_cli.sqlite_safe_read import has_live_connection, read_header_bytes_preopen
+from sqlite_support import RETIRED_GENERATION_DIR_SUFFIX, is_zeroed_sqlite_file
 
 from agent.provider_media import GENERATED_SUBDIR
 from hermes_cli.archive_safe import normalize_archive_parts
-from hermes_cli.backup_atomic import _atomic_output_path
+from hermes_cli.backup_atomic import _atomic_output_path, publish_private_tree
 from hermes_cli.backup_integrity import verify_sqlite_integrity
 from hermes_cli.backup_sqlite import _safe_copy_db
 from hermes_cli.backup_staging import prune_backup_staging, reclaim_backup_staging, staged_backup_file, warn_legacy_backup_file
@@ -354,28 +353,6 @@ def _snapshot_db(src: Path, dst: Path) -> bool:
         return _safe_copy_db(src, dst)
     admin = open_store_admin(src)
     return not isinstance(admin, AdminUnsupported) and admin.backup_to(dst)
-
-
-def is_zeroed_sqlite_file(path: Path, *, probe_bytes: int = 100, force: bool = False) -> bool:
-    """True when *path* looks like the #68474 zeroed-state.db signature.
-
-    Only regular files qualify: probing a FIFO/device/socket could block indefinitely.
-
-    Signature: no ``SQLite format 3`` header and no data — either empty (size 0, the total-loss case,
-    #97568) or first *probe_bytes* all NUL. Used at SessionDB open and for snapshot diagnostics so a silent
-    all-zero file becomes a guided recovery instead of a generic failure.
-    """
-    try:
-        if not path.is_file():
-            return False
-    except OSError:
-        return False
-    if not force and has_live_connection(path):
-        return False
-
-    head = read_header_bytes_preopen(path, length=max(16, probe_bytes), force=force)
-    # Empty or all-NUL header => zeroed; a real header (or unreadable) => not.
-    return head is not None and not head.startswith(b"SQLite format 3") and not any(head)
 
 
 def _discard_failed_zip_members(zf: zipfile.ZipFile, filelist_len: int) -> None:
@@ -1361,21 +1338,9 @@ def _create_quick_snapshot_locked(
     with open(staging_dir / "manifest.json", "w", encoding="utf-8") as f:
         json.dump(meta, f, indent=2)
 
-    # Make the staged quick snapshot owner-only before it is published. The
-    # staging directory is private from creation, so copied source modes can
-    # be normalized safely before the final atomic rename exposes the
-    # snapshot. Permission failures are intentionally fatal: publishing a
-    # readable recovery bundle is worse than reporting a failed snapshot.
-    if os.name != "nt":
-        os.chmod(root, 0o700)
-        os.chmod(staging_dir, 0o700)
-        for path in staging_dir.rglob("*"):
-            if path.is_dir():
-                os.chmod(path, 0o700)
-            elif path.is_file():
-                os.chmod(path, 0o600)
-
-    os.replace(staging_dir, snap_dir)
+    # Make the staged quick snapshot owner-only, durable, then visible (update auto-restore trusts
+    # a published snapshot, so its files must not read back as zeros after a crash).
+    publish_private_tree(staging_dir, snap_dir)
 
     # Auto-prune. Defaults preserve historical manual /snapshot behavior; callers
     # with known high-churn safety snapshots (for example pre-update) can pass a

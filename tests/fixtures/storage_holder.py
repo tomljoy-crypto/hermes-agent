@@ -190,6 +190,14 @@ def read_busy_timeout_seam():
     return _holder, "_READ_BUSY_TIMEOUT_S"
 
 
+def drift_probe_seam():
+    """``(module, name)``: the backend's holder module and the name of the declared-schema probe a browse's read-only
+    open runs on its connection (``name(conn, home)``: the missing table or column, or None), for a stub patched
+    where the holder looks it up."""
+    from persistence.sqlite import _holder
+    return _holder, "declared_schema_drift"
+
+
 def store_copy_seam():
     """``(module, name)``: the backend's backup module and the name of the WAL-safe file copy the store admin's
     ``backup_to`` runs (``name(src, dst, *, timeout_seconds)``, False when no snapshot could be made), for a stub
@@ -250,13 +258,13 @@ def hosted_attachment_setup_seam():
 def header_probe_fds():
     """``(lock, fds)``: the backend's open ``state.db`` header probes by path (``fds[path]`` is ``(fd, dev, ino)``)
     and the lock guarding them, for a fixture that closes the probes its own test opened."""
-    import hermes_state_dbfile as dbfile
+    from persistence.sqlite._state import dbfile
     return dbfile._HEADER_PROBE_LOCK, dbfile._HEADER_PROBE_FDS
 
 
 def state_db_replaced_error():
     """The error the backend raises on a read or write of a ``state.db`` replaced under the open store."""
-    from hermes_state_errors import StateDbReplacedError
+    from persistence.sqlite._state.errors import StateDbReplacedError
     return StateDbReplacedError
 
 

@@ -13,7 +13,7 @@ from session_rules.turns import flatten_message_text, project_compaction_message
 
 from persistence.sqlite._holder import StoreHolder
 from persistence.sqlite._schema_ddl import _sql_json_extract
-from hermes_state_common import _shape_preview
+from persistence.sqlite._state.common import _shape_preview
 from persistence.sqlite.conversation._store.compaction_display import not_a_later_tool_copy_sql
 from persistence.sqlite.conversation._store.compression import _compression_tip_on
 from persistence.sqlite.conversation._store.local import POLICY_PREFIX
@@ -23,7 +23,9 @@ from persistence.sqlite.conversation._store.messages import (
 )
 from persistence.sqlite.conversation._store.messages_sql import _DISPLAY_INDEX_MISSING_SQL, DISPLAY_VISIBLE_SQL
 from persistence.sqlite.conversation._store.sessions import _workspace_key_clause, get_session
-from persistence.sqlite.conversation._store.sql_common import _placeholders, _sql_preview_raw, _sql_session_last_active
+from persistence.sqlite.conversation._store.sql_common import (
+    _in_one_read, _placeholders, _sql_preview_raw, _sql_session_last_active,
+)
 
 # The rows that can hold a compaction handoff (``ContextCompressor.classify_summary_content``'s prefixes,
 # the merged delimiter, or the stored flag) for each shown row: the row itself, or an earlier copy of its
@@ -87,20 +89,6 @@ _LAST_REPLIES_SQL = (
 
 def _ids(values: Iterable[str]) -> str:
     return json.dumps(sorted(set(values)))
-
-
-def _in_one_read(holder: StoreHolder, read):
-    """``read(conn)`` in one read transaction (inside a ``transcript_read_snapshot``: its transaction)."""
-    def run(conn):
-        began = not conn.in_transaction
-        if began:
-            conn.execute("BEGIN")
-        try:
-            return read(conn)
-        finally:
-            if began and conn.in_transaction:
-                conn.execute("ROLLBACK")
-    return holder._read_retrying_ioerr(run)
 
 
 # -- session.transcript ------------------------------------------------------------------------------

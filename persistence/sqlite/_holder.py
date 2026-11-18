@@ -28,35 +28,44 @@ from pathlib import Path
 from typing import Any, Callable, Iterator, Optional, TypeVar, cast
 
 from hermes_constants import mkdir_under_hermes_home
-from hermes_state_common import escape_like as _escape_like, stat_db_file_identity as _stat_db_file_identity
-from hermes_state_holders import read_only_db_uri
-from hermes_state_health import (
+from persistence.sqlite._state.common import escape_like as _escape_like, stat_db_file_identity as _stat_db_file_identity
+from persistence.sqlite._state.holders import read_only_db_uri
+from persistence.sqlite._state.health import (
     STORAGE_CORRUPT, mark_storage_corrupt, note_storage_error, storage_corrupt_reason, storage_state,
 )
-from hermes_state_errors import (
-    _DELETED_WAL_GENERATION_MSG, _DISK_IO_ERROR_MARKER, _STATE_DB_CORRUPT_MSG, _STATE_DB_GENERATION_KEY, _STATE_DB_REPLACED_MSG, DeletedWalGenerationError, SessionCompressionInProgressError, StateDbCorruptError, StateDbReplacedError, _is_no_more_rows, classify_persistence_error, is_malformed_db_error, is_malformed_schema_error, is_sqlite_lock_error,
+from persistence.sqlite._state.errors import (
+    _DELETED_WAL_GENERATION_MSG, _DISK_IO_ERROR_MARKER, _STATE_DB_CORRUPT_MSG, _STATE_DB_GENERATION_KEY,
+    _STATE_DB_REPLACED_MSG, DeletedWalGenerationError, SessionCompressionInProgressError, StateDbCorruptError,
+    StateDbReplacedError, _is_no_more_rows, classify_persistence_error, is_malformed_schema_error,
 )
-from hermes_state_guard import (
-    _STATE_DB_GUARD_BYPASS_ENV, _in_test_context, _is_production_state_db, _real_platform_state_root, _register_test_instance,
+from persistence.sqlite._state.guard import (
+    _STATE_DB_GUARD_BYPASS_ENV, _in_test_context, _is_production_state_db, _real_platform_state_root,
+    _register_test_instance,
 )
-from hermes_state_readpool import _READ_POOL_MAX, _proc_fd_targets, _read_budget_for, note_read_pool_exhausted
-import hermes_state_holders as _state_holders
-import hermes_state_lockguard as _lockguard
-from hermes_state_lockowners import log_write_lock_holders
-from hermes_state_write import WriterMutexTimeout, write_site, writer_mutex_until
-from hermes_state_dbfile import (
-    _chmod_pinned_inode, _connect_tracked_db, _fd_is_truly_unlinked, _is_operator_store_link, _prepare_connection_retirement, _read_sqlite_application_id, _stat_sqlite_sidecar_identity, _watched_sqlite_sidecar_paths, has_invalid_sqlite_header_preopen, quarantine_cross_process_lock, quarantine_invalid_state_db, RetiredGenerationCaptureError, capture_retired_wal_generation, refuse_deleted_wal_generation,
+from persistence.sqlite._state.readpool import (
+    _READ_POOL_MAX, _proc_fd_targets, _read_budget_for, note_read_pool_exhausted,
 )
-from hermes_state_wal import _on_disk_journal_mode, apply_wal_with_fallback
-from hermes_state_repair import _claim_repair_attempt, preflight_db_writability, repair_state_db_schema
+from persistence.sqlite._state import holders as _state_holders
+from persistence.sqlite._state import lockguard as _lockguard
+from persistence.sqlite._state.lockowners import log_write_lock_holders
+from persistence.sqlite._state.write import WriterMutexTimeout, write_site, writer_mutex_until
+from persistence.sqlite._state.dbfile import (
+    _chmod_pinned_inode, _connect_tracked_db, _fd_is_truly_unlinked, _is_operator_store_link, _prepare_connection_retirement,
+    _read_sqlite_application_id, _stat_sqlite_sidecar_identity,
+    _watched_sqlite_sidecar_paths, has_invalid_sqlite_header_preopen, quarantine_cross_process_lock,
+    quarantine_invalid_state_db,
+    RetiredGenerationCaptureError, capture_retired_wal_generation, refuse_deleted_wal_generation,
+)
+from persistence.sqlite._state.repair import _claim_repair_attempt, preflight_db_writability, repair_state_db_schema
 from persistence.conversation.messages import ReadCheck
-from persistence.core.errors import CompressionInProgress
-from hermes_state_wal import apply_database_pragmas
+from persistence.core.errors import CompressionInProgress, DeclarativeDrift
+from sqlite_support import _on_disk_journal_mode, apply_database_pragmas, apply_wal_with_fallback
+from storage_errors import is_malformed_db_error, is_sqlite_lock_error
 from storage_user_copy import set_last_init_error
 
 from ._schema import (
     _enter_fts_fail_open, _fts_table_probe, _init_schema, _is_fts_write_corruption_error,
-    _try_incremental_merge_fts,
+    _try_incremental_merge_fts, declared_schema_drift,
 )
 
 # Pre-split logger identity so log filtering/capture is unchanged.
@@ -288,12 +297,14 @@ class StoreHolder:
             logger.warning("%s close failed for %s: %s", label, self.db_path, exc)
 
     def __init__(self, db_path: Path, read_only: bool = False, *, creation_site: Optional[str] = None,
-                 read_patience_s: Optional[float] = None):
+                 read_patience_s: Optional[float] = None, check_drift: bool = False):
         self.db_path = db_path
         _ensure_test_isolation(self.db_path)  # before any connection/pragma/mkdir
         self.read_only = read_only
         # The lock wait a read-only holder opens its one connection with; the reads it serves inherit it.
         self._read_busy_timeout_s = _READ_BUSY_TIMEOUT_S if read_patience_s is None else read_patience_s
+        # A browse's read-only open: also refuses a store behind the declared schema (DeclarativeDrift).
+        self._check_drift = check_drift
         # Keep only the opening call site, never a frame (which pins caller locals).
         self._creation_site = creation_site or "unknown"
         caller = None
@@ -373,8 +384,10 @@ class StoreHolder:
             self._record_db_file_identity()
             initialization_complete = True
         except Exception as exc:
-            # Surface WHY via /resume and friends; callers keep their ``_session_db = None`` path.
-            set_last_init_error(f"{type(exc).__name__}: {exc}")
+            # Surface WHY via /resume and friends; callers keep their ``_session_db = None`` path. A browse open
+            # (check_drift) reports its own failure to its caller and leaves the process's record alone.
+            if not self._check_drift:
+                set_last_init_error(f"{type(exc).__name__}: {exc}")
             raise
         finally:
             if not initialization_complete:
@@ -451,6 +464,8 @@ class StoreHolder:
                 self._conn = conn = self._connect_read_only(timeout=self._read_busy_timeout_s)
                 try:
                     apply_database_pragmas(conn, db_label="state.db")
+                    if self._check_drift and (drift := declared_schema_drift(conn, self.db_path.parent)):
+                        raise DeclarativeDrift(drift)
                     cursor = conn.cursor()
                     self._fts_enabled = _fts_table_probe(self, cursor, "messages_fts") is True
                     if self._fts_enabled:
