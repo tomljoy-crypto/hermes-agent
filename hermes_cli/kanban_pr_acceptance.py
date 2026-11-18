@@ -118,28 +118,6 @@ class _GateInfraError(RuntimeError):
     """The gh CLI itself is missing or unusable on this host — actionable as infra."""
 
 
-def _secret_source_bootstrap_env() -> frozenset[str]:
-    """Env names the secret sources authenticate with, so a child ``gh`` never carries a vault token.
-
-    PR #155697 scrubs the same set via ``tools.environments.local_env_policy.
-    _secret_source_bootstrap_env``, a helper that does not exist on this deploy line
-    (importing it raises ImportError), so the set is derived here from the secret-source
-    registry: every source declares the config key and default env name it reads. Falls
-    back to the two bundled names when the registry cannot load — popping a name nobody
-    set costs nothing, leaking one costs a credential.
-    """
-    bundled = {"BWS_ACCESS_TOKEN", "OP_SERVICE_ACCOUNT_TOKEN"}
-    try:
-        from agent.secret_sources.registry import list_sources
-        declared = {
-            str(getattr(source, "default_token_env", "") or "")
-            for source in list_sources()
-            if getattr(source, "token_env_key", None)
-        }
-    except Exception:  # never let the scrub decide whether the acceptance read happens
-        return frozenset(bundled)
-    return frozenset(declared | bundled)
-
 def _gh_env(profile_home: str | None) -> dict[str, str] | None:
     """Child env for ``gh``: the card's profile identity when one is resolvable.
 
@@ -157,6 +135,7 @@ def _gh_env(profile_home: str | None) -> dict[str, str] | None:
         return None
     from agent.secret_scope import build_profile_secret_scope
     from tools.environments.local import _is_routed_home, hermes_subprocess_env, served_profile_child_env
+    from tools.environments.local_env_policy import _secret_source_bootstrap_env
     base = hermes_subprocess_env(inherit_credentials=False)
     routed = _is_routed_home(profile_home)
     if routed:
