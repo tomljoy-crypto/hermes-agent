@@ -121,7 +121,16 @@ def _systemd(home: Path, deadline: float) -> ExistingService | None:
     # With a unit installed anywhere, both scopes are asked: two claiming the name is a conflict.
     installed = (*paths, Path("/usr/lib/systemd/system") / unit, Path("/lib/systemd/system") / unit)
     if not any(_exists(p) for p in installed):
-        return None
+        if suffix == "":
+            default_unit = "hermes-gateway-default.service"
+            default_paths = (Path.home() / ".config/systemd/user" / default_unit, Path("/etc/systemd/system") / default_unit)
+            default_installed = (*default_paths, Path("/usr/lib/systemd/system") / default_unit, Path("/lib/systemd/system") / default_unit)
+            if any(_exists(p) for p in default_installed):
+                unit = default_unit
+                paths = default_paths
+                installed = default_installed
+        if not any(_exists(p) for p in installed):
+            return None
     found = []
     for system in (False, True):
         command = gw._systemctl_cmd(system)
