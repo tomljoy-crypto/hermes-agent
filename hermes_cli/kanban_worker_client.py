@@ -22,6 +22,10 @@ from typing import Optional
 # ``OWNER_WAIT_S`` is the longest the owner may stay silent between answers before the worker
 # gives up (the first ``kanban.run`` answer has its own wait, ``admission_answer_budget``).
 OWNER_WAIT_S = 180.0
+_TRANSIENT_OWNER_STATES = frozenset({'draining', 'starting'})
+# In-band owner refusals that leave the attempt intact: a draining owner admits nothing new, and a
+# retired authority's successor holds the admission the next connection reads.
+_TRANSIENT_RPC_REASONS = frozenset({'runtime_draining', 'runtime_retired'})
 # Past the board lock wait: the owner's session setup and receipt before and after the write.
 ADMISSION_ANSWER_MARGIN_S = 60.0
 # A scoped worker outlives its owner: the process is its own systemd scope and its claim lease is the
