@@ -135,7 +135,6 @@ def _gh_env(profile_home: str | None) -> dict[str, str] | None:
         return None
     from agent.secret_scope import build_profile_secret_scope
     from tools.environments.local import _is_routed_home, hermes_subprocess_env, served_profile_child_env
-    from tools.environments.local_env_policy import _secret_source_bootstrap_env
     base = hermes_subprocess_env(inherit_credentials=False)
     routed = _is_routed_home(profile_home)
     if routed:
@@ -151,14 +150,7 @@ def _gh_env(profile_home: str | None) -> dict[str, str] | None:
     env.update((key, scope[key]) for key in _GH_GITHUB_LOGIN_KEYS if scope.get(key))
     env.update((key, scope[key]) for key in _GH_TRANSPORT_KEYS if key in scope)  # NO_PROXY= clears
     if routed and not (env.keys() & set(_GH_GITHUB_LOGIN_KEYS)):
-        # gh's config dir decides which login `gh api` uses, yet it is a path, not a
-        # credential, so no scrub list sees it; the target's own value is overlaid from its .env.
-        base.pop("GH_CONFIG_DIR", None)
-    env = served_profile_child_env(base=base, target_home=profile_home, inherit_credentials=True)
-    # The profile overlay re-adds a vault bootstrap token from the target's .env; gh never uses it.
-    for name in _secret_source_bootstrap_env():
-        env.pop(name, None)
-    if routed and not (env.keys() & {"GH_TOKEN", "GITHUB_TOKEN", "GH_CONFIG_DIR"}):        # HOME/XDG_CONFIG_HOME are still the launch process's: without a login of its own the
+        # HOME/XDG_CONFIG_HOME are still the launch process's: without a login of its own the
         # child would fall through to ~/.config/gh/hosts.yml — the ambient login. Pin gh's config
         # to a profile-owned dir so it fails "not logged in" (exit 4 -> auth) instead.
         env["GH_CONFIG_DIR"] = str(Path(profile_home) / "gh")
