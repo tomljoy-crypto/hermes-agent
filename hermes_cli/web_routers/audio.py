@@ -260,11 +260,19 @@ async def get_elevenlabs_voices(profile: Optional[str] = None):
 
         payload = await asyncio.to_thread(_fetch)
     except urllib.error.HTTPError as exc:
-        # An auth failure (bad/expired/scoped key) is a persistent, user-fixable
-        # state and the desktop polls this on every settings open/focus, so
-        # treat 401/403 as "integration unavailable": 200 to the UI and log at
-        # most once until the error signature changes.
-        if exc.code in (401, 403):
+        # An auth failure (bad/expired/scoped key, or HTTP 400 invalid_api_key
+        # when a key ID is supplied instead of an API key) is a persistent,
+        # user-fixable state and the desktop polls this on every settings
+        # open/focus, so treat it as "integration unavailable": 200 to the UI
+        # and log at most once until the error signature changes.
+        is_invalid_key_400 = False
+        if exc.code == 400:
+            try:
+                body = exc.read(4096).decode("utf-8", errors="replace").lower()
+                is_invalid_key_400 = "invalid_api_key" in body or "api key" in body
+            except Exception:
+                is_invalid_key_400 = False
+        if exc.code in (401, 403) or is_invalid_key_400:
             if _voice_list_error_logged_once(f"http-{exc.code}"):
                 _log.info("ElevenLabs voices unavailable: %s — check ELEVENLABS_API_KEY", exc)
             return {"available": False, "voices": [], "error": "unauthorized"}

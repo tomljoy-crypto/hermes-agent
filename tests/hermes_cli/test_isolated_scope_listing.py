@@ -178,3 +178,14 @@ def test_real_profile_flag_isolated_serve_lists_only_its_profile(tmp_path):
                 p.kill()
         proc.wait(timeout=10)
     assert [p["name"] for p in body["profiles"]] == ["worker"]
+
+
+def test_isolated_scope_env_opt_out_lists_every_profile(client, homes, monkeypatch):
+    _seed(homes["default"], "default-chat")
+    _seed(homes["worker"], "worker-chat")
+    monkeypatch.setenv("HERMES_DASHBOARD_SCOPE", "all")
+    assert _launch_in(monkeypatch, homes["worker"], isolated=True, desktop_owned=False) is None
+
+    assert {p["name"] for p in client.get("/api/profiles").json()["profiles"]} == {"default", "worker"}
+    assert client.get("/api/status").json()["isolated_profile"] is None
+    assert _sidebar_ids(client) == {"default-chat", "worker-chat"}

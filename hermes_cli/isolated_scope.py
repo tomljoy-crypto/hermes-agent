@@ -9,13 +9,15 @@ containers.
 
 Captured once at launch as a canonical path (never a name string: ``get_active_profile_name()``
 answers ``default``/``custom`` sentinels that are also valid profile ids), because a
-multi-profile host mirrors a turn's profile into ``HERMES_HOME`` later. The root home and
+multi-profile host mirrors a turn's profile into ``HERMES_HOME`` later. The root home,
 Desktop-owned backends (its SSH ``serve --isolated`` is one backend per connection serving every
-profile by ``?profile=``) stay unscoped.
+profile by ``?profile=``), and servers explicitly launched with ``HERMES_DASHBOARD_SCOPE=all``
+stay unscoped.
 """
 
 from __future__ import annotations
 
+import os
 from typing import Iterable, Optional, TypeVar
 
 T = TypeVar("T")
@@ -27,6 +29,8 @@ def record_launch_scope(*, isolated: bool, desktop_owned: bool) -> Optional[str]
     """Pin the listing scope for this process from its launch home; returns the profile or None."""
     global _LAUNCH_PROFILE
     _LAUNCH_PROFILE = None
+    if os.environ.get("HERMES_DASHBOARD_SCOPE", "").strip().lower() == "all":
+        return None
     if isolated and not desktop_owned:
         from hermes_constants import get_default_hermes_root, get_process_hermes_home, profile_name_for_home
 

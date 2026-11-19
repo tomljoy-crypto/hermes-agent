@@ -122,3 +122,27 @@ async def test_voices_route_rejects_oversized_response(monkeypatch, tmp_path):
     with pytest.raises(HTTPException) as exc_info:
         await audio.get_elevenlabs_voices()
     assert exc_info.value.status_code == 502
+
+
+@pytest.mark.asyncio
+async def test_voices_route_treats_400_invalid_api_key_as_unauthorized(monkeypatch, tmp_path):
+    import io
+    import urllib.error
+    from hermes_cli.web_routers import audio
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
+    (tmp_path / ".hermes").mkdir()
+    monkeypatch.setenv("ELEVENLABS_API_KEY", "7fe19ad800000000000000000000000000000000000000000000000000000000")
+
+    def _raise_400(req, timeout=None):
+        raise urllib.error.HTTPError(
+            req.full_url,
+            400,
+            "Bad Request",
+            {},
+            io.BytesIO(b'{"detail":{"status":"invalid_api_key","message":"API key ID used as API key"}}'),
+        )
+
+    monkeypatch.setattr(audio.urllib.request, "urlopen", _raise_400)
+    result = await audio.get_elevenlabs_voices()
+    assert result == {"available": False, "voices": [], "error": "unauthorized"}
